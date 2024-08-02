@@ -356,7 +356,8 @@ static void applyRpmLimiter(mixerRuntime_t *mixer)
 
     // PID
     const float p = error * mixer->rpmLimiterPGain;
-    const float d = (error - prevError) * mixer->rpmLimiterDGain; // rpmLimiterDGain already adjusted for looprate (see mixer_init.c)
+    const float unsmoothed_d = (error - prevError) * mixer->rpmLimiterDGain; // rpmLimiterDGain already adjusted for looprate (see mixer_init.c)
+    const float d = pt1FilterApply(&mixer->rpmLimiterDTermFilter, unsmoothed_d); 
     mixer->rpmLimiterI += error * mixer->rpmLimiterIGain;         // rpmLimiterIGain already adjusted for looprate (see mixer_init.c)
     mixer->rpmLimiterI = MAX(0.0f, mixer->rpmLimiterI);
     float pidOutput = p + mixer->rpmLimiterI + d;
@@ -379,7 +380,7 @@ static void applyRpmLimiter(mixerRuntime_t *mixer)
 
     DEBUG_SET(DEBUG_RPM_LIMIT, 0, lrintf(averageRpm));
     DEBUG_SET(DEBUG_RPM_LIMIT, 1, lrintf(rpmLimiterThrottleScaleOffset * 100.0f));
-    DEBUG_SET(DEBUG_RPM_LIMIT, 2, lrintf(mixer->rpmLimiterThrottleScale * 100.0f));
+    DEBUG_SET(DEBUG_RPM_LIMIT, 2, lrintf(unsmoothedAverageRpm));
     DEBUG_SET(DEBUG_RPM_LIMIT, 3, lrintf(throttle * 100.0f));
     DEBUG_SET(DEBUG_RPM_LIMIT, 4, lrintf(error));
     DEBUG_SET(DEBUG_RPM_LIMIT, 5, lrintf(p * 100.0f));

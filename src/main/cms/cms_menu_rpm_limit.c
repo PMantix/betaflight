@@ -73,7 +73,9 @@ static const OSD_Entry cmsx_menuRpmLimitEntries[] =
     {  "ACTIVE",   OME_Bool | REBOOT_REQUIRED,  NULL, &rpm_limit },
     { "MAX RPM", OME_UINT16, NULL, &(OSD_UINT16_t){ &rpm_limit_value, 0, UINT16_MAX, 100} },
     { "KV", OME_UINT16, NULL, &(OSD_UINT16_t){ &kv, 0, UINT16_MAX, 1} },
-    { "RPM FILTER CUTOFF", OME_UINT16, NULL, &(OSD_UINT16_t){ &rpm_limit_rpm_filter_cutoff, 1, UINT16_MAX, 1000} }, 
+    { "RPM FILT CUTOFF", OME_UINT16, NULL, &(OSD_UINT16_t){ &rpm_limit_rpm_filter_cutoff, 0, UINT16_MAX, 1000} }, 
+    { "THR SCALE CUTOFF", OME_UINT16, NULL, &(OSD_UINT16_t){ &rpm_limit_thr_scale_cutoff, 0, UINT16_MAX, 1000} }, 
+    { "D TERM CUTOFF", OME_UINT16, NULL, &(OSD_UINT16_t){ &rpm_limit_d_term_cutoff, 0, UINT16_MAX, 1000} },
 
     { "SAVE&REBOOT",     OME_OSD_Exit, cmsMenuExit,   (void *)CMS_POPUP_SAVEREBOOT },
     { "BACK", OME_Back, NULL, NULL },

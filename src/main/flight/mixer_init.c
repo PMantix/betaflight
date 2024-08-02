@@ -63,6 +63,8 @@ void pgResetFn_mixerConfig(mixerConfig_t *mixerConfig)
     mixerConfig->rpm_limit_d = 8;
     mixerConfig->rpm_limit_value = 18000;
     mixerConfig->rpm_limit_rpm_filter_cutoff = 6;
+    mixerConfig->rpm_limit_thr_scale_cutoff = 2;
+    mixerConfig->rpm_limit_d_term_cutoff = 0;
 #endif
 }
 
@@ -364,7 +366,8 @@ void mixerInitProfile(void)
     mixerRuntime.rpmLimiterDGain = mixerConfig()->rpm_limit_d * 3e-7f * pidGetPidFrequency();
     mixerRuntime.rpmLimiterI = 0.0;
     pt1FilterInit(&mixerRuntime.rpmLimiterAverageRpmFilter, pt1FilterGain(mixerConfig()->rpm_limit_rpm_filter_cutoff, pidGetDT()));
-    pt1FilterInit(&mixerRuntime.rpmLimiterThrottleScaleOffsetFilter, pt1FilterGain(2.0f, pidGetDT()));
+    pt1FilterInit(&mixerRuntime.rpmLimiterThrottleScaleOffsetFilter, pt1FilterGain(micerConfig()->rpm_limit_thr_scale_cutoff, pidGetDT()));
+    pt1FilterInit(&mixerRuntime.rpmLimiterDTermFilter, pt1FilterGain(micerConfig()->rpm_limit_d_term_cutoff, pidGetDT()));
     mixerResetRpmLimiter();
 #endif
 
