@@ -63,6 +63,7 @@ typedef struct mixerRuntime_s {
     float rpmLimiterI;
     pt1Filter_t rpmLimiterAverageRpmFilter;
     pt1Filter_t rpmLimiterThrottleScaleOffsetFilter;
+    pt1Filter_t rpmLimiterDTermFilter;  
 #endif
     float ezLandingThreshold;
     float ezLandingLimit;

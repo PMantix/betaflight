@@ -41,6 +41,8 @@ uint16_t rpm_limit_value;
 uint16_t kv;
 bool rpm_limit;
 uint16_t rpm_limit_rpm_filter_cutoff;
+uint16_t rpm_limit_thr_scale_cutoff;
+uint16_t rpm_limit_d_term_cutoff;
 
 static const void *cmsx_RpmLimit_onEnter(displayPort_t *pDisp)
 {
