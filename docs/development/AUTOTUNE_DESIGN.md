@@ -161,18 +161,48 @@ typedef struct {
 } stepResponseMetrics_t;
 ```
 
-### Method 2: Doublet Injection
+### Method 2: Doublet Injection (IMPLEMENTED ✅)
 
-Two opposing pulses to measure symmetric response:
+**Implementation Status:** Complete in Milestone 2
+
+Two opposing pulses to measure symmetric response with zero net displacement:
 ```
-     ┌───┐
-     │   │
-─────┘   └───┐
-             │
-             └───┐
-                 │
+Bidirectional Doublet Pattern: +A, -2A, +2A, -2A, +2A, -A
+
+Phase 1: +A     ────┐
+Phase 2: -2A        │        ┌────
+Phase 3: +2A        │    ┌───┘
+Phase 4: -2A        │    │   ┌────
+Phase 5: +2A        │    │   │
+Phase 6: -A         └────┴───┴────
+
+Net displacement: A - 2A + 2A - 2A + 2A - A = 0
+Duration: 6 × step_duration_ms (default 600ms)
 ```
-Advantage: Returns to original state, safer for in-flight
+
+**Advantages:**
+- ✅ Returns to original attitude naturally (zero net displacement)
+- ✅ Tests both directions symmetrically (detects asymmetries)
+- ✅ Safer for in-flight use (no accumulated angle error)
+- ✅ More data from single maneuver (multiple transitions)
+- ✅ Strong, visible aircraft response for validation
+
+**Design Evolution:**
+1. Simple doublet: +A, -A (doesn't guarantee return to origin)
+2. 3-2-1-1 doublet: +A, -2A, +A (single direction dominant)
+3. Bidirectional weak: +A, -2A, +A, -A, +2A, -A (weak middle)
+4. **Final bidirectional**: +A, -2A, +2A, -2A, +2A, -A ✅ (strong symmetric)
+
+**Configuration:**
+- `autotune_step_amplitude`: Excitation magnitude (default 100 deg/s)
+- `autotune_step_duration_ms`: Duration per phase (default 100ms)
+- Total test time: 6× duration + 3× duration settling = 900ms
+
+**Sample Collection:**
+- 200Hz sample rate (PID frequency independent)
+- ~120 samples during excitation
+- ~60 samples during settling observation
+- ~181 total samples per axis test
 
 ### Method 3: Relay Feedback (Åström-Hägglund Method)
 
@@ -1393,11 +1423,11 @@ Each milestone produces working, testable code before proceeding to the next pha
 
 ---
 
-### Milestone 1: Infrastructure & State Machine (Week 1-2)
+### Milestone 1: Infrastructure & State Machine (Week 1-2) ✅ COMPLETE
 
 **Goal**: Basic autotune framework that compiles and can be activated, but doesn't tune yet.
 
-#### 1.1 Create Core Files
+#### 1.1 Create Core Files ✅
 ```
 src/main/flight/autotune.c      - Main state machine
 src/main/flight/autotune.h      - Public interface
@@ -1405,99 +1435,165 @@ src/main/pg/autotune.c          - Parameter group
 src/main/pg/autotune.h          - Configuration structure
 ```
 
-#### 1.2 Implement State Machine Shell
-- [ ] Define `autotuneState_e` enum (IDLE, SETUP, EXCITE, MEASURE, ANALYZE, ADJUST, COMPLETE, ABORTED)
-- [ ] Create `autotuneRuntime_t` structure with minimal fields
-- [ ] Implement `autotuneInit()`, `autotuneUpdate()`, `autotuneIsActive()`
-- [ ] Add state transition logic with timeout handling
+#### 1.2 Implement State Machine Shell ✅
+- [x] Define `autotuneState_e` enum (IDLE, SETUP, WAIT_STABLE, EXCITE, MEASURE, ANALYZE, ADJUST, COMPLETE, ABORTED)
+- [x] Create `autotuneRuntime_t` structure with timing and state tracking
+- [x] Implement `autotuneInit()`, `autotuneUpdate()`, `autotuneIsActive()`, `autotuneGetState()`
+- [x] Add state transition logic with `changeState()` helper
+- [x] Added `stateJustEntered` flag for reliable state initialization
 
-#### 1.3 Add Box Mode Integration
-- [ ] Add `BOXAUTOTUNE` to `src/main/fc/rc_modes.h`
-- [ ] Add mode definition in `src/main/msp/msp_box.c`
-- [ ] Hook into flight mode handling
+#### 1.3 Add Box Mode Integration ✅
+- [x] Add `BOXAUTOTUNE` to `src/main/fc/rc_modes.h`
+- [x] Add mode definition in `src/main/msp/msp_box.c`
+- [x] Hook into flight mode handling with `IS_RC_MODE_ACTIVE(BOXAUTOTUNE)`
+- [x] Add beeper feedback (start, done, fail)
 
-#### 1.4 Add Basic Safety Checks
-- [ ] Attitude limit checks
-- [ ] Throttle range validation
-- [ ] Stick input detection (abort if pilot commanding)
-- [ ] Immediate abort and PID restore on safety violation
+#### 1.4 Add Basic Safety Checks ✅
+- [x] Attitude limit checks (±30° configurable)
+- [x] Gyro rate validation (<500 deg/s)
+- [x] Throttle range validation (20-80%, uses `calculateThrottlePercent()`)
+- [x] Stick input detection with 20% deflection threshold
+- [x] Immediate abort and state transition to ABORTED on safety violation
+- [x] Continuous safety monitoring in all active states
 
-**Test Criteria**:
+#### 1.5 Additional Features Implemented ✅
+- [x] Comprehensive debug output (8 channels) via `DEBUG_AUTOTUNE`
+- [x] CLI commands for configuration (`get autotune`, `set autotune_*`)
+- [x] Parameter group with sensible defaults
+- [x] Build system integration with `USE_AUTOTUNE` flag
+- [x] Integration with PID controller via `autotuneModifySetpoint()`
+
+**Test Criteria**: ✅ ALL PASSED
 - Autotune mode appears in Configurator
-- Switch activates/deactivates mode
-- State machine transitions visible in debug
-- Safety abort works correctly
+- Switch activates/deactivates mode correctly
+- State machine transitions visible in debug[0]
+- Safety abort works correctly (tested with excessive stick input)
+- Flight validated: States progress 1→2→3→4→5→6→7
+- Throttle bug fixed (calculateThrottlePercent vs manual calculation)
+
+**Implementation Notes:**
+- State initialization bug discovered and fixed with `stateJustEntered` flag
+- Safety checks designed with 2s SETUP delay for stabilization
+- Debug output proven invaluable for remote troubleshooting
 
 ---
 
-### Milestone 2: Step Response Measurement (Week 3-4)
+### Milestone 2: Step Response Measurement (Week 3-4) ✅ COMPLETE
 
 **Goal**: Inject step setpoint and measure response metrics accurately.
 
-#### 2.1 Implement Step Injection
-- [ ] Add setpoint modification in PID loop when EXCITE state active
-- [ ] Configurable step amplitude (degrees/sec)
-- [ ] Configurable step duration (ms)
-- [ ] Proper timing using `micros()`
+#### 2.1 Implement Excitation Injection ✅
+- [x] Additive setpoint modification in PID loop (after acceleration limiting)
+- [x] Configurable step amplitude (`autotune_step_amplitude`, default 100 deg/s)
+- [x] Configurable step duration (`autotune_step_duration_ms`, default 100ms)
+- [x] **Bidirectional doublet**: +A, -2A, +2A, -2A, +2A, -A (zero net displacement)
+- [x] Total duration: 6× step_duration (600ms with defaults)
+- [x] Proper timing using `cmpTimeUs()` with `timeDelta_t` types
+- [x] Excitation only applied during EXCITE state on tested axis
 
-#### 2.2 Implement Sample Collection
-- [ ] Circular buffer for gyro history
-- [ ] Circular buffer for setpoint history
-- [ ] Synchronized timestamp recording
-- [ ] Proper sample rate handling
+#### 2.2 Implement Sample Collection ✅
+- [x] Fixed-size buffers: `gyroHistory[200]`, `setpointHistory[200]`
+- [x] Dynamic sample interval based on PID frequency (`AUTOTUNE_TARGET_SAMPLE_RATE_HZ = 200`)
+- [x] Calculation: `sampleIntervalLoops = pidFrequency / targetSampleRate`
+- [x] Subsample every N PID loops to maintain 200Hz regardless of PID loop rate
+- [x] Synchronized collection during EXCITE and MEASURE states
+- [x] Sample count tracking and buffer management
 
-#### 2.3 Implement Step Response Analysis
-- [ ] `findStepStart()` - Detect when step was injected
-- [ ] `calculateRiseTime()` - Time from 10% to 90%
-- [ ] `calculateOvershoot()` - Peak beyond target
-- [ ] `calculateSettlingTime()` - Time to stay within 5%
-- [ ] `detectOscillation()` - Count zero crossings, estimate frequency
+#### 2.3 Sample Collection Performance ✅
+- EXCITE state: ~120 samples over 600ms doublet
+- MEASURE state: ~60 samples over 300ms settling period
+- Total: ~181 samples collected per test
+- Memory: ~1.6KB (200 samples × 2 arrays × 4 bytes)
 
-#### 2.4 Add Debug Output
-- [ ] Debug mode to output metrics via blackbox
-- [ ] OSD element showing current measurement state
+#### 2.4 Add Debug Output ✅
+- [x] Debug mode `DEBUG_AUTOTUNE` with 8 channels:
+  - debug[0]: State number
+  - debug[1]: Sample count / State markers
+  - debug[2]: Gyro rate (current axis)
+  - debug[3]: Excitation signal (doublet pattern visible)
+  - debug[4]: Safety check status
+  - debug[5]: Throttle percentage
+  - debug[6]: Stick deflection percentage  
+  - debug[7]: Time elapsed in doublet (ms)
 
-**Test Criteria**:
-- Step injection visible in blackbox log
-- Metrics calculated match manual analysis of same log
-- Oscillation detection correctly identifies unstable response
-- Works on bench with props off (simulated response)
+**Test Criteria**: ✅ ALL PASSED
+- Bidirectional doublet injection visible in blackbox (clear +100/-200/+200/-200/+200/-100 pattern)
+- Aircraft responds visibly to excitation (felt and seen in flight)
+- 181 samples collected successfully (validated in blackbox)
+- Sample rate consistent at 200Hz regardless of PID frequency
+- State 3 (EXCITE) no longer skipped (initialization bug fixed)
+- Natural return to hover after doublet (zero net displacement confirmed)
+
+**Implementation Notes:**
+- Evolved from simple doublet to bidirectional for better identification
+- Fixed state initialization bug (exact time comparison → flag-based)
+- Fixed type mismatch in duration comparisons (`uint32_t` → `timeDelta_t`)
+- Dynamic sample rate calculation prevents issues when PID frequency changes
+- Additive control model preserves pilot authority throughout tuning
+
+**Key Design Decisions:**
+- Bidirectional doublet chosen over single step for symmetry and return to origin
+- Additive control model (pilot + autotune) vs override model for safety
+- Sample buffers sized for ~1 second of data at 200Hz
+- MEASURE state captures settling behavior after excitation stops
 
 ---
 
-### Milestone 3: Basic PID Adjustment (Week 5-6)
+### Milestone 3: Basic PID Adjustment (Week 5-6) 🔄 IN PROGRESS
 
 **Goal**: Complete single-axis P/D tuning loop that improves tune quality.
 
-#### 3.1 Implement Tune Score Calculation
+#### 3.1 Implement Step Response Analysis ⏳
+- [ ] `findStepEdges()` - Detect transitions in setpointHistory[]
+- [ ] `calculateRiseTime()` - Time from 10% to 90% of target
+- [ ] `calculateOvershoot()` - Peak detection and percentage calculation
+- [ ] `calculateSettlingTime()` - Time to stay within ±5% of target
+- [ ] `detectOscillation()` - Zero-crossing detection for frequency
+- [ ] `calculateGyroNoise()` - RMS noise measurement in stable regions
+- [ ] Metric validation and sanity checking
+
+#### 3.2 Implement Tune Score Calculation ⏳
 - [ ] Weighted scoring function
-- [ ] Penalize overshoot beyond target
+- [ ] Penalize overshoot deviation from target
 - [ ] Penalize slow rise time
+- [ ] Penalize long settling time
 - [ ] Heavily penalize oscillation
+- [ ] Track best score across iterations
 
-#### 3.2 Implement P/D Adjustment Algorithm
-- [ ] Gradient-based P adjustment (overshoot → reduce P)
-- [ ] Gradient-based D adjustment (oscillation → adjust D based on frequency)
+#### 3.3 Implement P/D Adjustment Algorithm ⏳
+- [ ] **Independent P tuning** based on rise time and steady-state error
+- [ ] **Independent D tuning** based on overshoot with noise constraint
+- [ ] **Noise-limited tuning**: Block D increases if gyro noise too high
+- [ ] Alternative: Reduce P when noise-limited instead of increasing D
 - [ ] Gain limiting (min/max constraints)
-- [ ] Step size limiting (max 10-15% change per iteration)
+- [ ] Step size limiting (max 20-30% change per iteration)
+- [ ] Flag `noiseLimited` condition for user awareness
 
-#### 3.3 Implement Iteration Loop
-- [ ] Track best score and best gains
-- [ ] Convergence detection (score improvement < threshold)
-- [ ] Maximum iteration limit
-- [ ] Revert to best if final is worse
+#### 3.4 Implement I-Term Adjustment ⏳
+- [ ] Measure steady-state error after settling
+- [ ] Adjust I based on residual tracking error
+- [ ] Prevent I wind-up issues
 
-#### 3.4 Implement Results Storage
-- [ ] Store original PIDs before tune
-- [ ] Store tuned PIDs
-- [ ] Provide CLI access to results
-- [ ] Optional auto-save on completion
+#### 3.5 Implement Gain Application ⏳
+- [ ] Store original gains before tuning
+- [ ] Write calculated gains to `pidProfile()->pid[axis].P/I/D`
+- [ ] Reinitialize PID controller with new gains
+- [ ] Log old vs new gains for comparison
 
 **Test Criteria**:
-- Single axis tunes to reasonable values in SITL
-- Tune improves step response vs starting values
-- Convergence occurs within max iterations
-- Results survive reboot if saved
+- Rise time calculation matches manual blackbox analysis
+- Overshoot detection accurate
+- Gyro noise RMS calculated correctly from stable regions
+- Calculated gains are reasonable (compare to typical values)
+- Gains successfully applied to PID controller
+- Flight test shows improved response
+- Noise-limited condition properly detected
+
+**Key Features:**
+- **Multivariable awareness**: P and D tuned independently with different metrics
+- **Noise constraint**: D increases blocked if gyro RMS > threshold
+- **Three-way tradeoff**: Documents responsiveness-efficiency-damping balance
+- **Foundation for M5+**: PID tuning with fixed filtering, prepares for joint optimization
 
 ---
 
