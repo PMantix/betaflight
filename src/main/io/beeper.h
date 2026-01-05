@@ -58,6 +58,9 @@ typedef enum {
     BEEPER_CAM_CONNECTION_OPEN,     // When the 5 key simulation stated
     BEEPER_CAM_CONNECTION_CLOSE,    // When the 5 key simulation stop
     BEEPER_ARMING_GPS_NO_FIX,       // Beep a special tone when arming the board and GPS has no fix
+    BEEPER_AUTOTUNE_START,          // Autotune mode activated
+    BEEPER_AUTOTUNE_DONE,           // Autotune completed successfully
+    BEEPER_AUTOTUNE_FAIL,           // Autotune failed or aborted
     BEEPER_ALL,                     // Turn ON or OFF all beeper conditions
     // BEEPER_ALL must remain at the bottom of this enum
 } beeperMode_e;

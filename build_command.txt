@@ -1,0 +1,45 @@
+clear;cd c:\Users\pmant\source\repos\betaflight\betaflight; & "C:\Program Files\Git\bin\bash.exe" -c "make CONFIG=BETAFPVG473"
+
+Here's what each debug channel shows:
+
+debug[0] = State number
+
+0 = IDLE
+1 = SETUP
+2 = WAIT_STABLE
+3 = EXCITE
+4 = MEASURE
+5 = ANALYZE
+6 = ADJUST
+7 = COMPLETE
+8 = ABORTED
+debug[1] = Sample count / Markers
+
+During EXCITE/MEASURE: increments as samples collected (0-200)
+Special values:
+1000 = Activation marker
+2000 = Deactivation marker
+3333 = Excitation start marker
+4444 = Measurement start marker
+5555 = Analysis start marker
+debug[2] = Gyro rate (deg/s) on current axis being tested
+
+debug[3] = Excitation signal (deg/s)
+
+Should show +100 (or +300 if you changed it) during first half of doublet
+Should show -100 (or -300) during second half of doublet
+0 otherwise
+debug[4] = Safety check status
+
+0 = All checks passed
+1 = Attitude check failed (>30°)
+2 = Gyro rate check failed (>500 deg/s)
+3 = Throttle check failed (<20% or >80%)
+4 = Stick deflection check failed (>20%)
+debug[5] = Throttle percentage (0-100)
+
+debug[6] = Maximum stick deflection percentage (0-100)
+
+debug[7] = Time elapsed in doublet (milliseconds) - only during EXCITE state
+
+Key thing to check: debug[3] should show clear positive/negative pulses during state 3 (EXCITE). If it stays at 0, the excitation isn't being generated or applied.

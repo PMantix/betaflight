@@ -43,6 +43,7 @@
 #include "fc/core.h"
 #include "fc/rc.h"
 #include "fc/rc_controls.h"
+#include "fc/rc_modes.h"
 #include "fc/runtime_config.h"
 
 #include "flight/autopilot.h"
@@ -61,6 +62,10 @@
 #include "sensors/acceleration.h"
 #include "sensors/battery.h"
 #include "sensors/gyro.h"
+
+#ifdef USE_AUTOTUNE
+#include "flight/autotune.h"
+#endif
 
 #include "pid.h"
 
@@ -1254,6 +1259,12 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         if (pidRuntime.maxVelocity[axis]) {
             currentPidSetpoint = accelerationLimit(axis, currentPidSetpoint);
         }
+        
+#ifdef USE_AUTOTUNE
+        // Add autotune excitation signal (doublet injection)
+        currentPidSetpoint = autotuneModifySetpoint(axis, currentPidSetpoint, currentTimeUs);
+#endif
+        
         // Yaw control is GYRO based, direct sticks control is applied to rate PID
         // When Race Mode is active PITCH control is also GYRO based in level or horizon mode
 #if defined(USE_ACC)
@@ -1549,6 +1560,12 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
     } else if (pidRuntime.zeroThrottleItermReset) {
         pidResetIterm();
     }
+
+#ifdef USE_AUTOTUNE
+    if (IS_RC_MODE_ACTIVE(BOXAUTOTUNE)) {
+        autotuneUpdate(currentTimeUs);
+    }
+#endif
 }
 
 bool crashRecoveryModeActive(void)

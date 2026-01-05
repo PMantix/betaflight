@@ -80,6 +80,9 @@
 #include "pg/adc.h"
 #include "pg/alt_hold.h"
 #include "pg/autopilot.h"
+#ifdef USE_AUTOTUNE
+#include "pg/autotune.h"
+#endif
 #include "pg/beeper.h"
 #include "pg/beeper_dev.h"
 #include "pg/bus_i2c.h"
@@ -1433,6 +1436,19 @@ const clivalue_t valueTable[] = {
     { PARAM_NAME_SPA_YAW_MODE,       VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_SPA_MODE }, PG_PID_PROFILE, offsetof(pidProfile_t, spa_mode[FD_YAW]) },
     { PARAM_NAME_YAW_TYPE,           VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_YAW_TYPE }, PG_PID_PROFILE, offsetof(pidProfile_t, yaw_type) },
     { PARAM_NAME_ANGLE_PITCH_OFFSET, VAR_INT16 | PROFILE_VALUE, .config.minmaxUnsigned = { -ANGLE_PITCH_OFFSET_MAX, ANGLE_PITCH_OFFSET_MAX }, PG_PID_PROFILE, offsetof(pidProfile_t, angle_pitch_offset) },
+#endif
+
+// PG_AUTOTUNE_CONFIG
+#ifdef USE_AUTOTUNE
+    { "autotune_enabled",           VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, autotune_enabled) },
+    { "autotune_mode",              VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 2 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, autotune_mode) },
+    { "autotune_axes",              VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 7 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, autotune_axes) },
+    { "autotune_step_amplitude",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 200 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, step_amplitude) },
+    { "autotune_step_duration_ms",  VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 50, 500 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, step_duration_ms) },
+    { "autotune_target_overshoot",  VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, target_overshoot) },
+    { "autotune_max_iterations",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, max_iterations) },
+    { "autotune_safety_margin",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 50 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, safety_margin) },
+    { "autotune_save_on_complete",  VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, save_on_complete) },
 #endif
 
 // PG_TELEMETRY_CONFIG

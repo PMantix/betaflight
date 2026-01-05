@@ -4,6 +4,7 @@ PG_SRC = \
             pg/alt_hold_wing.c \
             pg/autopilot_multirotor.c \
             pg/autopilot_wing.c \
+            pg/autotune.c \
             pg/beeper.c \
             pg/beeper_dev.c \
             pg/board.c \
@@ -169,6 +170,7 @@ COMMON_SRC = \
             flight/mixer_tricopter.c \
             flight/pid.c \
             flight/pid_init.c \
+            flight/autotune.c \
             flight/position.c \
             flight/pos_hold_multirotor.c \
             flight/pos_hold_wing.c \

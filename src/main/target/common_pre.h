@@ -252,6 +252,7 @@
 #define USE_ESCSERIAL_SIMONK
 #define USE_ALTITUDE_HOLD
 #define USE_POSITION_HOLD
+#define USE_AUTOTUNE
 
 #if !defined(USE_GPS)
 #define USE_GPS
