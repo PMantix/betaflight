@@ -252,7 +252,10 @@
 #define USE_ESCSERIAL_SIMONK
 #define USE_ALTITUDE_HOLD
 #define USE_POSITION_HOLD
+// Disable autotune for STM32F745 (limited ITCM RAM - only 16KB)
+#if !defined(STM32F745xx)
 #define USE_AUTOTUNE
+#endif
 
 #if !defined(USE_GPS)
 #define USE_GPS
