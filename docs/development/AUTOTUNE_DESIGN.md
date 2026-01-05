@@ -46,6 +46,67 @@ Betaflight currently has:
 3. Per-axis tuning capability
 4. Safe operation with pilot override
 5. Support for different frame sizes and motor characteristics
+6. **Multivariable optimization**: Tune PIDs AND filtering together for optimal performance
+
+### The Fundamental Tradeoff: The Three-Way Problem
+
+**The Core Challenge:**
+Multirotor tuning is not a simple 1D optimization - it's a complex multivariable problem with interdependent parameters:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    THE TUNING TRIANGLE                       │
+│                                                              │
+│                    RESPONSIVENESS                            │
+│                          ▲                                   │
+│                         / \                                  │
+│                        /   \                                 │
+│                       /     \                                │
+│                      /       \                               │
+│                     /         \                              │
+│                    /           \                             │
+│                   /             \                            │
+│                  /               \                           │
+│                 /                 \                          │
+│                /                   \                         │
+│               /                     \                        │
+│              /        SWEET          \                       │
+│             /         SPOT            \                      │
+│            /            ◆              \                     │
+│           /                             \                    │
+│          /                               \                   │
+│         /                                 \                  │
+│        /                                   \                 │
+│       /                                     \                │
+│      /                                       \               │
+│     /__________________________________________\              │
+│   EFFICIENCY/                                  DAMPING/      │
+│   LOW NOISE                                    STABILITY     │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+You can't maximize all three simultaneously - it's always a tradeoff:
+
+1. More D gain → Better damping → BUT amplifies gyro noise → hot motors, poor efficiency
+2. More gyro filtering → Cleaner signal → Can use more D → BUT phase lag → sluggish response
+3. Less filtering + More P → Responsive feel → BUT limited D (noise) → more overshoot
+
+The pilot's dilemma:
+- Racing pilots: Prioritize responsiveness, tolerate noise/heat
+- Freestyle pilots: Balance all three
+- Cinematic pilots: Prioritize smoothness, accept slower response
+- Long-range pilots: Prioritize efficiency, minimize heat
+```
+
+**What Makes This Hard:**
+- PIDs and filtering are **intimately coupled** - you can't tune one without affecting the other
+- Different hardware has different noise floors (gyro quality, frame stiffness, motor/bearing quality)
+- Props create resonances at specific frequencies (need notch filters)
+- The optimal point changes with battery voltage, temperature, prop wear
+- Manual tuning takes 10-50+ flights to find the sweet spot
+
+**Autotune's Value Proposition:**
+If autotune can optimize **BOTH** PID gains **AND** filtering parameters together, it solves the problem that burns thousands of hours of pilot time worldwide. This is the real benefit - not just getting PIDs close, but finding the global optimum in the multidimensional parameter space.
 
 ---
 
