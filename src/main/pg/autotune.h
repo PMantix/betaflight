@@ -33,6 +33,22 @@ typedef struct autotuneConfig_s {
     uint8_t  max_iterations;          // Max tune iterations per axis (1-20)
     uint8_t  safety_margin;           // Attitude limit during tune (degrees)
     uint8_t  save_on_complete;        // 1=auto-save, 0=require manual save
+    
+    // Phase 1 parameters
+    uint8_t  phase1_start_p_percent;      // Starting P % (50-90)
+    uint8_t  phase1_start_d_percent;      // Starting D % (50-90)
+    uint8_t  phase1_initial_ratio;        // Initial D/P ratio × 100 (40-100)
+    uint8_t  phase1_target_overshoot_min; // Min overshoot for critical damping (0-20)
+    uint8_t  phase1_target_overshoot_max; // Max overshoot for critical damping (5-30)
+    uint8_t  phase1_max_iterations;       // Max iterations for Phase 1 (3-10)
+    
+    // Phase 2 parameters
+    uint8_t  phase2_aggressive_multiplier;  // Aggressive scale factor × 100 (110-150)
+    uint8_t  phase2_cautious_multiplier;    // Cautious scale factor × 100 (105-125)
+    uint8_t  phase2_max_iterations;         // Max iterations for Phase 2 (5-15)
+    
+    // Phase 3 parameters
+    uint8_t  phase3_max_iterations;         // Max iterations for Phase 3 (1-5)
 } autotuneConfig_t;
 
 PG_DECLARE(autotuneConfig_t, autotuneConfig);

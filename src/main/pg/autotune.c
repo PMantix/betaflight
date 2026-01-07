@@ -33,6 +33,22 @@ PG_RESET_TEMPLATE(autotuneConfig_t, autotuneConfig,
     .max_iterations = 10,
     .safety_margin = 30,                // 30 degrees
     .save_on_complete = 0,              // Don't auto-save
+    
+    // Phase 1 defaults
+    .phase1_start_p_percent = 70,
+    .phase1_start_d_percent = 70,
+    .phase1_initial_ratio = 70,
+    .phase1_target_overshoot_min = 5,
+    .phase1_target_overshoot_max = 15,
+    .phase1_max_iterations = 5,
+    
+    // Phase 2 defaults
+    .phase2_aggressive_multiplier = 125,
+    .phase2_cautious_multiplier = 110,
+    .phase2_max_iterations = 8,
+    
+    // Phase 3 defaults
+    .phase3_max_iterations = 3,
 );
 
 #endif // USE_AUTOTUNE

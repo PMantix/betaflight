@@ -1449,6 +1449,22 @@ const clivalue_t valueTable[] = {
     { "autotune_max_iterations",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, max_iterations) },
     { "autotune_safety_margin",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 50 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, safety_margin) },
     { "autotune_save_on_complete",  VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, save_on_complete) },
+    
+    // Phase 1 parameters
+    { "autotune_phase1_start_p_percent",      VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 50, 90 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase1_start_p_percent) },
+    { "autotune_phase1_start_d_percent",      VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 50, 90 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase1_start_d_percent) },
+    { "autotune_phase1_initial_ratio",        VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 40, 100 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase1_initial_ratio) },
+    { "autotune_phase1_target_overshoot_min", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase1_target_overshoot_min) },
+    { "autotune_phase1_target_overshoot_max", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 5, 30 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase1_target_overshoot_max) },
+    { "autotune_phase1_max_iterations",       VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 3, 10 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase1_max_iterations) },
+    
+    // Phase 2 parameters
+    { "autotune_phase2_aggressive_multiplier", VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 110, 150 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase2_aggressive_multiplier) },
+    { "autotune_phase2_cautious_multiplier",   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 105, 125 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase2_cautious_multiplier) },
+    { "autotune_phase2_max_iterations",        VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 5, 15 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase2_max_iterations) },
+    
+    // Phase 3 parameters
+    { "autotune_phase3_max_iterations",        VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 1, 5 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, phase3_max_iterations) },
 #endif
 
 // PG_TELEMETRY_CONFIG
