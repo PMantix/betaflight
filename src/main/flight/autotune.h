@@ -17,19 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "common/time.h"
-
-// State machine states
-typedef enum {
-    AUTOTUNE_STATE_IDLE = 0,
-    AUTOTUNE_STATE_SETUP,
-    AUTOTUNE_STATE_WAIT_STABLE,
-    AUTOTUNE_STATE_EXCITE,
-    AUTOTUNE_STATE_MEASURE,
-    AUTOTUNE_STATE_ANALYZE,
-    AUTOTUNE_STATE_ADJUST,
-    AUTOTUNE_STATE_COMPLETE,
-    AUTOTUNE_STATE_ABORTED,
-} autotuneState_e;
+#include "flight/autotune_types.h"
 
 // Public functions
 void autotuneInit(void);
@@ -37,4 +25,5 @@ void autotuneUpdate(timeUs_t currentTimeUs);
 bool autotuneIsActive(void);
 autotuneState_e autotuneGetState(void);
 const char* autotuneGetStateName(void);
+const char* autotuneGetModeName(void);
 float autotuneModifySetpoint(uint8_t axis, float setpoint, timeUs_t currentTimeUs);

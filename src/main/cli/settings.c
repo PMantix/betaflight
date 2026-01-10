@@ -1441,14 +1441,13 @@ const clivalue_t valueTable[] = {
 // PG_AUTOTUNE_CONFIG
 #ifdef USE_AUTOTUNE
     { "autotune_enabled",           VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, autotune_enabled) },
-    { "autotune_mode",              VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 2 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, autotune_mode) },
-    { "autotune_axes",              VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 7 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, autotune_axes) },
-    { "autotune_step_amplitude",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 200 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, step_amplitude) },
-    { "autotune_step_duration_ms",  VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 50, 500 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, step_duration_ms) },
-    { "autotune_target_overshoot",  VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, target_overshoot) },
-    { "autotune_max_iterations",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, max_iterations) },
-    { "autotune_safety_margin",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 50 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, safety_margin) },
+    { "autotune_max_iterations",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 50 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, max_iterations) },
+    { "autotune_safety_margin",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 60 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, safety_margin) },
     { "autotune_save_on_complete",  VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, save_on_complete) },
+    { "autotune_overshoot_min",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, target_overshoot_min) },
+    { "autotune_overshoot_max",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 10, 40 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, target_overshoot_max) },
+    { "autotune_noise_target",      VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, noise_target) },
+    { "autotune_gain_step",         VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 2, 20 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, gain_step_percent) },
 #endif
 
 // PG_TELEMETRY_CONFIG

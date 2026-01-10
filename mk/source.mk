@@ -171,6 +171,8 @@ COMMON_SRC = \
             flight/pid.c \
             flight/pid_init.c \
             flight/autotune.c \
+            flight/autotune_analysis.c \
+            flight/autotune_gains.c \
             flight/position.c \
             flight/pos_hold_multirotor.c \
             flight/pos_hold_wing.c \
