@@ -24,6 +24,11 @@
 #include "common/maths.h"
 #include "flight/autotune_types.h"
 #include "flight/autotune_analysis.h"
+#include "flight/dyn_notch_filter.h"
+
+// Resonance detection thresholds
+#define RESONANCE_MIN_FREQ_HZ       30.0f   // Below this is acceptable for motors
+#define RESONANCE_MAX_FREQ_HZ      500.0f   // Above this is usually handled by LPF anyway
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -334,6 +339,38 @@ void autotuneAnalyzeResponse(
     // Initial response delay: time from setpoint change to gyro starting to move
     metricsOut->initialResponseDelay = (float)(idx10) * samplePeriodMs;
     
+    // Calculate peak stick velocity and velocity-weighted tracking error
+    // F-term is most important when stick is moving fast, so we weight errors by stick velocity
+    float peakStickVelocity = 0.0f;
+    float velocityWeightedErrorSum = 0.0f;
+    float velocityWeightSum = 0.0f;
+    
+    // Analyze the onset portion (from maneuver start to peak setpoint)
+    for (uint16_t i = maneuverStart + 1; i < peakSetpointIdx && i < sampleCount; i++) {
+        // Calculate stick velocity (change in setpoint per sample)
+        float stickDelta = fabsf(setpointSamples[i] - setpointSamples[i-1]);
+        
+        // Track peak velocity
+        if (stickDelta > peakStickVelocity) {
+            peakStickVelocity = stickDelta;
+        }
+        
+        // Calculate tracking error at this instant
+        float trackingErr = fabsf(setpointSamples[i]) - fabsf(gyroSamples[i]);
+        
+        // Weight the error by stick velocity - fast stick movements with ANY lag matter more
+        // Use velocity squared to emphasize high-velocity regions
+        float weight = stickDelta * stickDelta;
+        velocityWeightedErrorSum += trackingErr * weight;
+        velocityWeightSum += weight;
+    }
+    
+    metricsOut->peakStickVelocity = peakStickVelocity;
+    
+    if (velocityWeightSum > 0.01f) {
+        metricsOut->velocityWeightedLag = velocityWeightedErrorSum / velocityWeightSum;
+    }
+    
     // Stick lead error: during ramp-up, how much does stick lead gyro?
     // Compare setpoint to gyro in the 10-50% rise region
     if (idx50 > idx10 + 2) {
@@ -436,40 +473,78 @@ void autotuneAttributeGains(
     attributionOut->confidence = 0.5f;  // Default medium confidence
     
     // =========================================================================
-    // PHASE 1: Check for clear I-term issues (independent of response class)
+    // PHASE 0: Check for oscillation FIRST
+    // =========================================================================
+    // If there's significant oscillation, this is a P/D issue, not an I issue.
+    // Skip I-term drift check if oscillating - the "drift" is just one swing of the oscillation.
+    
+    bool hasSignificantOscillation = (metrics->oscillationAmplitude > OSCILLATION_THRESHOLD * 0.5f);
+    
+    // =========================================================================
+    // PHASE 1: Check for clear I-term issues (only if NOT oscillating)
     // =========================================================================
     
-    // Drift after settling = I too low (not holding position)
-    // Note: This needs to be high enough to ignore measurement noise
-    if (fabsf(metrics->driftRate) > 20.0f) {  // >20 deg/s per second of drift
-        attributionOut->primary = GAIN_ATTRIBUTION_I;
-        attributionOut->iDirection = ADJUST_INCREASE;
-        attributionOut->confidence = 0.7f;
-        return;  // Clear I issue, handle it
-    }
-    
-    // Bounceback = I too high (windup causing overshoot in opposite direction)
-    if (metrics->bouncebackPercent > 30.0f) {
-        attributionOut->primary = GAIN_ATTRIBUTION_I;
-        attributionOut->iDirection = ADJUST_DECREASE;
-        attributionOut->secondary = GAIN_ATTRIBUTION_D;
-        attributionOut->dDirection = ADJUST_INCREASE;  // D can help damp the bounce
-        attributionOut->confidence = 0.7f;
-        return;
-    }
-    
-    // Slow oscillation (<5Hz) = I windup / I too high
-    if (metrics->slowOscillationHz > 0.5f && metrics->slowOscillationHz < 5.0f) {
-        attributionOut->primary = GAIN_ATTRIBUTION_I;
-        attributionOut->iDirection = ADJUST_DECREASE;
-        attributionOut->confidence = 0.6f;
-        return;
+    if (!hasSignificantOscillation) {
+        // Drift after settling = I too low (not holding position)
+        // Only valid if quad is NOT oscillating, otherwise "drift" is just oscillation
+        if (fabsf(metrics->driftRate) > 20.0f) {  // >20 deg/s per second of drift
+            attributionOut->primary = GAIN_ATTRIBUTION_I;
+            attributionOut->iDirection = ADJUST_INCREASE;
+            attributionOut->confidence = 0.7f;
+            return;  // Clear I issue, handle it
+        }
+        
+        // Bounceback = I too high (windup causing overshoot in opposite direction)
+        if (metrics->bouncebackPercent > 30.0f) {
+            attributionOut->primary = GAIN_ATTRIBUTION_I;
+            attributionOut->iDirection = ADJUST_DECREASE;
+            attributionOut->secondary = GAIN_ATTRIBUTION_D;
+            attributionOut->dDirection = ADJUST_INCREASE;  // D can help damp the bounce
+            attributionOut->confidence = 0.7f;
+            return;
+        }
+        
+        // Slow oscillation (<5Hz) = I windup / I too high
+        if (metrics->slowOscillationHz > 0.5f && metrics->slowOscillationHz < 5.0f) {
+            attributionOut->primary = GAIN_ATTRIBUTION_I;
+            attributionOut->iDirection = ADJUST_DECREASE;
+            attributionOut->confidence = 0.6f;
+            return;
+        }
     }
     
     // =========================================================================
     // PHASE 2: Check for clear F-term issues
     // =========================================================================
     
+    // NEW: Velocity-weighted lag detection
+    // If sticks were moving fast (high velocity) and there's ANY measurable lag, F needs adjustment
+    // This catches the "last 50% of onset" scenario where small lags matter during fast moves
+    bool highVelocityManeuver = (metrics->peakStickVelocity > 15.0f);  // Fast stick movement
+    
+    if (highVelocityManeuver) {
+        // During fast stick movements, be very sensitive to tracking lag
+        // Even 5 deg/s weighted lag during high velocity is significant
+        if (metrics->velocityWeightedLag > 5.0f) {
+            // Lag during fast stick movement = F too low
+            attributionOut->primary = GAIN_ATTRIBUTION_F;
+            attributionOut->fDirection = ADJUST_INCREASE;
+            // Higher confidence when velocity was high and lag is clear
+            attributionOut->confidence = MIN(0.9f, 0.5f + metrics->velocityWeightedLag / 50.0f);
+            return;
+        }
+        
+        // Also check for gyro leading stick during fast movements
+        if (metrics->velocityWeightedLag < -3.0f) {
+            // Gyro leading stick during fast movement = F too high
+            attributionOut->primary = GAIN_ATTRIBUTION_F;
+            attributionOut->fDirection = ADJUST_DECREASE;
+            attributionOut->confidence = 0.7f;
+            return;
+        }
+    }
+    
+    // Original checks (still useful for moderate-speed maneuvers)
     // Significant stick lead error = F too low (gyro lagging stick input)
     if (metrics->stickLeadError > 30.0f && metrics->riseTimeMs < 40.0f) {
         // Good P/D (fast rise), but gyro lags stick = needs more feedforward
@@ -734,29 +809,63 @@ void autotuneAnalyzeNoise(
         highThrottleEnd = sampleCount;
     }
     
-    // Calculate noise floor in high-throttle region
+    // Calculate noise floor in high-throttle region (for RMS backstop)
     filterOut->noiseFloor = autotuneCalculateRms(gyroSamples, highThrottleStart, highThrottleEnd);
     
-    // Simple resonance detection using oscillation frequency
-    float oscFreq = autotuneDetectOscillationFreq(
-        &gyroSamples[highThrottleStart],
-        highThrottleEnd - highThrottleStart,
-        sampleRateHz
-    );
-    
-    // Check if there's a dominant frequency in typical motor noise range (100-400Hz)
-    if (oscFreq > 80.0f && oscFreq < 500.0f) {
-        // Could be frame resonance - check amplitude
-        float peakAmp = 0.0f;
-        for (uint16_t i = highThrottleStart; i < highThrottleEnd; i++) {
-            peakAmp = MAX(peakAmp, fabsf(gyroSamples[i]));
+    // Use dynamic notch SDFT data for resonance detection
+    // This is much more accurate than zero-crossing as it uses actual FFT peaks
+    if (isDynNotchActive()) {
+        int notchCount = getDynNotchCount();
+        float highestPeakInRange = 0.0f;
+        float highestPeakFreq = 0.0f;
+        
+        // Check all axes for resonances in the problematic frequency range
+        for (int axis = 0; axis < 3; axis++) {
+            for (int peak = 0; peak < notchCount; peak++) {
+                float peakFreq = getDynNotchCenterFreq(axis, peak);
+                
+                // Only consider peaks in the problematic range (30-500Hz)
+                // Below 30Hz is acceptable for motors, above 500Hz is usually filtered by LPF
+                if (peakFreq > RESONANCE_MIN_FREQ_HZ && peakFreq < RESONANCE_MAX_FREQ_HZ) {
+                    // Track the highest frequency peak in range
+                    // (higher frequencies are typically more problematic for propwash/resonance)
+                    if (peakFreq > highestPeakFreq) {
+                        highestPeakFreq = peakFreq;
+                        highestPeakInRange = peakFreq;  // We don't have amplitude from accessor
+                    }
+                }
+            }
         }
         
-        if (peakAmp > filterOut->noiseFloor * 3.0f) {
+        // If we found peaks in the problematic range, flag as resonance
+        if (highestPeakInRange > RESONANCE_MIN_FREQ_HZ) {
             filterOut->resonanceDetected = true;
-            filterOut->peakFrequency = oscFreq;
-            filterOut->peakAmplitude = peakAmp;
-            filterOut->suggestedNotchHz = (uint16_t)oscFreq;
+            filterOut->peakFrequency = highestPeakFreq;
+            filterOut->peakAmplitude = filterOut->noiseFloor * 3.0f;  // Estimated
+            filterOut->suggestedNotchHz = (uint16_t)highestPeakFreq;
+        }
+    } else {
+        // Fallback: simple resonance detection using oscillation frequency
+        float oscFreq = autotuneDetectOscillationFreq(
+            &gyroSamples[highThrottleStart],
+            highThrottleEnd - highThrottleStart,
+            sampleRateHz
+        );
+        
+        // Check if there's a dominant frequency in problematic range
+        if (oscFreq > RESONANCE_MIN_FREQ_HZ && oscFreq < RESONANCE_MAX_FREQ_HZ) {
+            // Could be frame resonance - check amplitude
+            float peakAmp = 0.0f;
+            for (uint16_t i = highThrottleStart; i < highThrottleEnd; i++) {
+                peakAmp = MAX(peakAmp, fabsf(gyroSamples[i]));
+            }
+            
+            if (peakAmp > filterOut->noiseFloor * 3.0f) {
+                filterOut->resonanceDetected = true;
+                filterOut->peakFrequency = oscFreq;
+                filterOut->peakAmplitude = peakAmp;
+                filterOut->suggestedNotchHz = (uint16_t)oscFreq;
+            }
         }
     }
 }

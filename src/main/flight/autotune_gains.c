@@ -22,13 +22,27 @@
 #ifdef USE_AUTOTUNE
 
 #include "common/maths.h"
+#include "config/simplified_tuning.h"
 #include "flight/pid.h"
 #include "flight/pid_init.h"
 #include "flight/autotune_types.h"
 #include "flight/autotune_gains.h"
+#include "sensors/gyro_init.h"
 
 // External access to current PID profile
 extern pidProfile_t *currentPidProfile;
+
+// ============================================================================
+// SLIDER MODE HELPER
+// ============================================================================
+
+// Disable simplified PID slider mode so our direct changes aren't overwritten
+static void disableSliderMode(void)
+{
+    if (currentPidProfile->simplified_pids_mode != PID_SIMPLIFIED_TUNING_OFF) {
+        currentPidProfile->simplified_pids_mode = PID_SIMPLIFIED_TUNING_OFF;
+    }
+}
 
 // ============================================================================
 // GAIN ACCESS HELPERS (inline macros for direct access)
@@ -88,11 +102,17 @@ float autotuneCalculateAdjustmentStep(
 bool autotuneApplyGainAdjustment(
     autotuneRuntime_t *runtime,
     const autotuneAttribution_t *attribution,
-    autotuneResponseClass_e responseClass
+    autotuneResponseClass_e responseClass,
+    uint16_t *reasonCode
 )
 {
     bool gainsChanged = false;
     uint8_t axis = runtime->currentAxis;
+    
+    // Initialize reason code
+    if (reasonCode) {
+        *reasonCode = REASON_PID_RESPONSE_GOOD;
+    }
     
     // Get adjustment step size
     float stepPercent = autotuneCalculateAdjustmentStep(
@@ -113,8 +133,20 @@ bool autotuneApplyGainAdjustment(
                 
                 if (attribution->pDirection == ADJUST_INCREASE) {
                     runtime->currentP = MIN(GAIN_MAX_VALUE, runtime->currentP + pDelta);
+                    // Set reason based on why we're increasing P
+                    if (reasonCode) {
+                        *reasonCode = REASON_PID_SLUGGISH_P_UP;  // Overdamped/sluggish -> raise P
+                    }
                 } else if (attribution->pDirection == ADJUST_DECREASE) {
                     runtime->currentP = MAX(GAIN_MIN_VALUE, runtime->currentP - pDelta);
+                    // Set reason based on why we're decreasing P
+                    if (reasonCode) {
+                        if (responseClass == RESPONSE_UNDERDAMPED) {
+                            *reasonCode = REASON_PID_OVERSHOOT_P_DOWN;  // Overshoot/oscillation
+                        } else {
+                            *reasonCode = REASON_PID_OSCILLATION_P_DOWN;  // Default for P down
+                        }
+                    }
                 }
                 
                 SET_GAIN_P(axis, runtime->currentP);
@@ -129,8 +161,26 @@ bool autotuneApplyGainAdjustment(
                 
                 if (attribution->dDirection == ADJUST_INCREASE) {
                     runtime->currentD = MIN(GAIN_MAX_VALUE, runtime->currentD + dDelta);
+                    // Set reason based on why we're increasing D
+                    if (reasonCode) {
+                        if (responseClass == RESPONSE_UNDERDAMPED) {
+                            *reasonCode = REASON_PID_OSCILLATION_D_UP;  // Oscillation -> more damping
+                        } else {
+                            *reasonCode = REASON_PID_OVERSHOOT_D_UP;  // Overshoot -> more damping
+                        }
+                    }
                 } else if (attribution->dDirection == ADJUST_DECREASE) {
                     runtime->currentD = MAX(GAIN_MIN_VALUE, runtime->currentD - dDelta);
+                    // Set reason based on why we're decreasing D
+                    if (reasonCode) {
+                        if (responseClass == RESPONSE_NOISY) {
+                            *reasonCode = REASON_PID_NOISE_D_DOWN;
+                        } else if (responseClass == RESPONSE_OVERDAMPED) {
+                            *reasonCode = REASON_PID_SLUGGISH_D_DOWN;
+                        } else {
+                            *reasonCode = REASON_PID_NOISE_D_DOWN;  // Default for D down
+                        }
+                    }
                 }
                 
                 SET_GAIN_D(axis, runtime->currentD);
@@ -145,8 +195,14 @@ bool autotuneApplyGainAdjustment(
                 
                 if (attribution->iDirection == ADJUST_INCREASE) {
                     runtime->currentI = MIN(GAIN_MAX_VALUE, runtime->currentI + iDelta);
+                    if (reasonCode) {
+                        *reasonCode = REASON_PID_DRIFT_I_UP;  // Drift detected, raising I
+                    }
                 } else if (attribution->iDirection == ADJUST_DECREASE) {
                     runtime->currentI = MAX(GAIN_MIN_VALUE, runtime->currentI - iDelta);
+                    if (reasonCode) {
+                        *reasonCode = REASON_PID_BOUNCEBACK_I_DOWN;  // Bounceback or slow osc, lowering I
+                    }
                 }
                 
                 SET_GAIN_I(axis, runtime->currentI);
@@ -161,8 +217,14 @@ bool autotuneApplyGainAdjustment(
                 
                 if (attribution->fDirection == ADJUST_INCREASE) {
                     runtime->currentF = MIN(2000, runtime->currentF + fDelta);
+                    if (reasonCode) {
+                        *reasonCode = REASON_PID_LAG_F_UP;  // Stick lag, raising F
+                    }
                 } else if (attribution->fDirection == ADJUST_DECREASE) {
                     runtime->currentF = MAX(0, runtime->currentF - fDelta);
+                    if (reasonCode) {
+                        *reasonCode = REASON_PID_LEAD_F_DOWN;  // Gyro leading stick, lowering F
+                    }
                 }
                 
                 SET_GAIN_F(axis, runtime->currentF);
@@ -216,7 +278,10 @@ bool autotuneApplyGainAdjustment(
         }
     }
     
-    UNUSED(responseClass);
+    // If we changed any gains, disable slider mode so changes persist
+    if (gainsChanged) {
+        disableSliderMode();
+    }
     
     return gainsChanged;
 }
@@ -303,85 +368,163 @@ void autotuneRestoreBestGains(autotuneRuntime_t *runtime)
 
 #include "sensors/gyro.h"
 
-// Filter frequency limits
-#define GYRO_LPF1_MIN_HZ     100
-#define GYRO_LPF1_MAX_HZ     400
-#define GYRO_LPF2_MIN_HZ     150
-#define GYRO_LPF2_MAX_HZ     500
-#define DTERM_LPF1_MIN_HZ     50
-#define DTERM_LPF1_MAX_HZ    200
-#define DTERM_LPF2_MIN_HZ    100
-#define DTERM_LPF2_MAX_HZ    300
+// Filter frequency limits are now defined in autotune_types.h:
+// GYRO_LPF1: [125-250-375], GYRO_LPF2: [250-500-750]
+// DTERM_LPF1: [37-75-112], DTERM_LPF2: [75-150-225]
 
-// Adjustment step size (Hz)
-#define FILTER_STEP_HZ       10
+// Resonance-based tuning: frequency threshold for problematic peaks
+#define RESONANCE_PROBLEM_FREQ_HZ  30.0f
 
 bool autotuneApplyFilterAdjustment(
     const autotuneFilterAnalysis_t *filterAnalysis,
     float currentNoise,
-    float targetNoise
+    float targetNoise,
+    uint16_t *reasonCode
 )
 {
-    UNUSED(filterAnalysis);
-    
     bool changed = false;
+    uint16_t reason = REASON_FILTER_NO_CHANGE;
     
-    // Get current filter settings
-    uint16_t gyroLpf1Hz = gyroConfig()->gyro_lpf1_static_hz;
+    // Check if LPF1 filters are in dynamic mode
+    // Dynamic mode: static_hz == 0 && dyn_min_hz > 0
+    bool gyroLpf1IsDynamic = (gyroConfig()->gyro_lpf1_static_hz == 0) && 
+                              (gyroConfig()->gyro_lpf1_dyn_min_hz > 0);
+    bool dtermLpf1IsDynamic = (currentPidProfile->dterm_lpf1_static_hz == 0) && 
+                               (currentPidProfile->dterm_lpf1_dyn_min_hz > 0);
+    
+    // Get current filter settings (dynamic min or static)
+    uint16_t gyroLpf1Hz = gyroLpf1IsDynamic ? 
+        gyroConfig()->gyro_lpf1_dyn_min_hz : gyroConfig()->gyro_lpf1_static_hz;
     uint16_t gyroLpf2Hz = gyroConfig()->gyro_lpf2_static_hz;
-    uint16_t dtermLpf1Hz = currentPidProfile->dterm_lpf1_static_hz;
+    uint16_t dtermLpf1Hz = dtermLpf1IsDynamic ? 
+        currentPidProfile->dterm_lpf1_dyn_min_hz : currentPidProfile->dterm_lpf1_static_hz;
     uint16_t dtermLpf2Hz = currentPidProfile->dterm_lpf2_static_hz;
     
-    // Calculate noise ratio - how far are we from target?
-    // ratio > 1 means too much noise, need more filtering (lower freqs)
-    // ratio < 1 means noise is low, can use less filtering (higher freqs)
-    float noiseRatio = (targetNoise > 0.1f) ? (currentNoise / targetNoise) : 1.0f;
+    // Track original values for change detection
+    uint16_t origGyroLpf1Hz = gyroLpf1Hz;
+    uint16_t origGyroLpf2Hz = gyroLpf2Hz;
+    uint16_t origDtermLpf1Hz = dtermLpf1Hz;
+    uint16_t origDtermLpf2Hz = dtermLpf2Hz;
     
-    if (noiseRatio > 1.2f) {
-        // Too much noise - lower filter frequencies (more aggressive filtering)
-        // Lower dterm first (most sensitive to noise)
-        if (dtermLpf1Hz > DTERM_LPF1_MIN_HZ) {
+    // PRIMARY DECISION: Resonance-based tuning
+    // If resonance peaks detected above 30Hz, tighten filters to eliminate them
+    // If no resonance, relax filters for better response
+    
+    if (filterAnalysis->resonanceDetected && filterAnalysis->peakFrequency > RESONANCE_PROBLEM_FREQ_HZ) {
+        // Resonance detected - need to tighten filters
+        // Lower LPF cutoffs to be below the peak frequency
+        float targetCutoff = filterAnalysis->peakFrequency * 0.7f;  // 30% below peak
+        
+        // Lower dterm LPF1 first (most sensitive to noise reaching motors)
+        if (dtermLpf1Hz > DTERM_LPF1_MIN_HZ && dtermLpf1Hz > targetCutoff) {
             dtermLpf1Hz = MAX(dtermLpf1Hz - FILTER_STEP_HZ, DTERM_LPF1_MIN_HZ);
+            reason = REASON_FILTER_RESONANCE_LPF;
             changed = true;
         }
-        if (dtermLpf2Hz > DTERM_LPF2_MIN_HZ && dtermLpf2Hz > 0) {
+        // Also lower dterm LPF2 if enabled
+        else if (dtermLpf2Hz > DTERM_LPF2_MIN_HZ && dtermLpf2Hz > 0 && dtermLpf2Hz > targetCutoff) {
             dtermLpf2Hz = MAX(dtermLpf2Hz - FILTER_STEP_HZ, DTERM_LPF2_MIN_HZ);
+            reason = REASON_FILTER_RESONANCE_LPF;
             changed = true;
         }
-        // If dterm is already at minimum, lower gyro filters
-        if (dtermLpf1Hz <= DTERM_LPF1_MIN_HZ && gyroLpf1Hz > GYRO_LPF1_MIN_HZ) {
+        // If dterm filters are already low, also lower gyro filters (only if enabled)
+        else if (dtermLpf1Hz <= DTERM_LPF1_MIN_HZ && gyroLpf1Hz > 0 && gyroLpf1Hz > GYRO_LPF1_MIN_HZ && gyroLpf1Hz > targetCutoff) {
             gyroLpf1Hz = MAX(gyroLpf1Hz - FILTER_STEP_HZ, GYRO_LPF1_MIN_HZ);
+            reason = REASON_FILTER_RESONANCE_LPF;
             changed = true;
+        } else {
+            reason = REASON_AT_LIMIT;
         }
-    } else if (noiseRatio < 0.8f) {
-        // Low noise - raise filter frequencies (less filtering, better response)
-        // Raise gyro first (less impact on noise)
-        if (gyroLpf1Hz < GYRO_LPF1_MAX_HZ && gyroLpf1Hz > 0) {
-            gyroLpf1Hz = MIN(gyroLpf1Hz + FILTER_STEP_HZ, GYRO_LPF1_MAX_HZ);
-            changed = true;
+    } else {
+        // NO resonance detected - adjust filters based on noise level
+        
+        // Calculate noise ratio (how far are we from target?)
+        float noiseRatio = (targetNoise > 0.1f) ? (currentNoise / targetNoise) : 1.0f;
+        
+        // If noise is BELOW target, can try relaxing filters for better response
+        if (noiseRatio < 0.8f) {
+            // Noise well below target - try to raise dterm filters first (more response)
+            if (dtermLpf1Hz > 0 && dtermLpf1Hz < DTERM_LPF1_MAX_HZ) {
+                dtermLpf1Hz = MIN(dtermLpf1Hz + FILTER_STEP_HZ, DTERM_LPF1_MAX_HZ);
+                reason = REASON_FILTER_NOISE_LOW_LPF;
+                changed = true;
+            } else if (dtermLpf2Hz < DTERM_LPF2_MAX_HZ && dtermLpf2Hz > 0) {
+                dtermLpf2Hz = MIN(dtermLpf2Hz + FILTER_STEP_HZ, DTERM_LPF2_MAX_HZ);
+                reason = REASON_FILTER_NOISE_LOW_LPF;
+                changed = true;
+            } else if (gyroLpf1Hz > 0 && gyroLpf1Hz < GYRO_LPF1_MAX_HZ) {
+                gyroLpf1Hz = MIN(gyroLpf1Hz + FILTER_STEP_HZ, GYRO_LPF1_MAX_HZ);
+                reason = REASON_FILTER_NOISE_LOW_LPF;
+                changed = true;
+            } else if (gyroLpf2Hz > 0 && gyroLpf2Hz < GYRO_LPF2_MAX_HZ) {
+                gyroLpf2Hz = MIN(gyroLpf2Hz + FILTER_STEP_HZ, GYRO_LPF2_MAX_HZ);
+                reason = REASON_FILTER_NOISE_LOW_LPF;
+                changed = true;
+            } else {
+                reason = REASON_AT_LIMIT;
+            }
         }
-        if (gyroLpf2Hz < GYRO_LPF2_MAX_HZ && gyroLpf2Hz > 0) {
-            gyroLpf2Hz = MIN(gyroLpf2Hz + FILTER_STEP_HZ, GYRO_LPF2_MAX_HZ);
-            changed = true;
-        }
-        // If gyro is already at maximum, raise dterm filters
-        if (gyroLpf1Hz >= GYRO_LPF1_MAX_HZ && dtermLpf1Hz < DTERM_LPF1_MAX_HZ) {
-            dtermLpf1Hz = MIN(dtermLpf1Hz + FILTER_STEP_HZ, DTERM_LPF1_MAX_HZ);
-            changed = true;
+        // If noise is ABOVE target, tighten filters
+        else if (noiseRatio > 1.2f) {
+            // Noise above target - lower dterm filters first (most impact on motor noise)
+            if (dtermLpf1Hz > DTERM_LPF1_MIN_HZ) {
+                dtermLpf1Hz = MAX(dtermLpf1Hz - FILTER_STEP_HZ, DTERM_LPF1_MIN_HZ);
+                reason = REASON_FILTER_NOISE_HIGH_LPF;
+                changed = true;
+            } else if (dtermLpf2Hz > DTERM_LPF2_MIN_HZ && dtermLpf2Hz > 0) {
+                dtermLpf2Hz = MAX(dtermLpf2Hz - FILTER_STEP_HZ, DTERM_LPF2_MIN_HZ);
+                reason = REASON_FILTER_NOISE_HIGH_LPF;
+                changed = true;
+            } else if (gyroLpf1Hz > 0 && gyroLpf1Hz > GYRO_LPF1_MIN_HZ) {
+                gyroLpf1Hz = MAX(gyroLpf1Hz - FILTER_STEP_HZ, GYRO_LPF1_MIN_HZ);
+                reason = REASON_FILTER_NOISE_HIGH_LPF;
+                changed = true;
+            } else {
+                reason = REASON_AT_LIMIT;
+            }
+        } else {
+            // Noise in acceptable range (0.8 - 1.2) - no change needed
+            reason = REASON_FILTER_NOISE_OK;
         }
     }
-    // else noise is in acceptable range - no change needed
     
     // Apply changes if any
     if (changed) {
-        gyroConfigMutable()->gyro_lpf1_static_hz = gyroLpf1Hz;
-        gyroConfigMutable()->gyro_lpf2_static_hz = gyroLpf2Hz;
-        currentPidProfile->dterm_lpf1_static_hz = dtermLpf1Hz;
-        currentPidProfile->dterm_lpf2_static_hz = dtermLpf2Hz;
+        // Apply gyro LPF1 (dynamic or static)
+        if (gyroLpf1Hz != origGyroLpf1Hz) {
+            if (gyroLpf1IsDynamic) {
+                gyroConfigMutable()->gyro_lpf1_dyn_min_hz = gyroLpf1Hz;
+            } else {
+                gyroConfigMutable()->gyro_lpf1_static_hz = gyroLpf1Hz;
+            }
+        }
         
-        // Note: Filter reinitialization would typically require pidInitFilters()
-        // but that's expensive - for now we just update the config
-        // The changes will take effect on next reboot or can be reinit'd
+        // Apply gyro LPF2 (always static)
+        if (gyroLpf2Hz != origGyroLpf2Hz) {
+            gyroConfigMutable()->gyro_lpf2_static_hz = gyroLpf2Hz;
+        }
+        
+        // Apply dterm LPF1 (dynamic or static)
+        if (dtermLpf1Hz != origDtermLpf1Hz) {
+            if (dtermLpf1IsDynamic) {
+                currentPidProfile->dterm_lpf1_dyn_min_hz = dtermLpf1Hz;
+            } else {
+                currentPidProfile->dterm_lpf1_static_hz = dtermLpf1Hz;
+            }
+        }
+        
+        // Apply dterm LPF2 (always static)
+        if (dtermLpf2Hz != origDtermLpf2Hz) {
+            currentPidProfile->dterm_lpf2_static_hz = dtermLpf2Hz;
+        }
+        
+        // Reinitialize filters so changes take effect immediately
+        gyroInitFilters();
+        pidInitFilters(currentPidProfile);
+    }
+    
+    if (reasonCode) {
+        *reasonCode = reason;
     }
     
     return changed;

@@ -427,4 +427,28 @@ void resetMaxFFT(void)
     dynNotch.maxCenterFreq = 0;
 }
 
+// Accessor functions for autotune resonance detection
+int getDynNotchCount(void)
+{
+    return dynNotch.count;
+}
+
+float getDynNotchCenterFreq(int axis, int peakIndex)
+{
+    if (axis < 0 || axis >= XYZ_AXIS_COUNT || peakIndex < 0 || peakIndex >= dynNotch.count) {
+        return 0.0f;
+    }
+    return dynNotch.centerFreq[axis][peakIndex];
+}
+
+float getDynNotchMinHz(void)
+{
+    return dynNotch.minHz;
+}
+
+float getDynNotchMaxHz(void)
+{
+    return dynNotch.maxHz;
+}
+
 #endif // USE_DYN_NOTCH_FILTER

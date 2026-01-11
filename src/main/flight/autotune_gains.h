@@ -23,11 +23,12 @@
 // ============================================================================
 
 // Apply gain adjustments based on analysis results
-// Returns true if gains were changed
+// Returns true if gains were changed, sets *reasonCode to explain what was done
 bool autotuneApplyGainAdjustment(
     autotuneRuntime_t *runtime,
     const autotuneAttribution_t *attribution,
-    autotuneResponseClass_e responseClass
+    autotuneResponseClass_e responseClass,
+    uint16_t *reasonCode
 );
 
 // Calculate adjustment step size based on confidence and history
@@ -51,8 +52,10 @@ void autotuneRestoreBestGains(autotuneRuntime_t *runtime);
 // ============================================================================
 
 // Apply filter adjustments based on noise analysis
+// Returns true if changes were made, sets *reasonCode to explain what was done
 bool autotuneApplyFilterAdjustment(
     const autotuneFilterAnalysis_t *filterAnalysis,
     float currentNoise,
-    float targetNoise
+    float targetNoise,
+    uint16_t *reasonCode
 );

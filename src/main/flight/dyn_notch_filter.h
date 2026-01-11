@@ -35,3 +35,9 @@ float dynNotchFilter(const int axis, float value);
 bool isDynNotchActive(void);
 int getMaxFFT(void);
 void resetMaxFFT(void);
+
+// Accessor functions for autotune resonance detection
+int getDynNotchCount(void);                           // Number of configured notches
+float getDynNotchCenterFreq(int axis, int peakIndex); // Get detected peak frequency (Hz)
+float getDynNotchMinHz(void);                         // Configured minimum Hz
+float getDynNotchMaxHz(void);                         // Configured maximum Hz
