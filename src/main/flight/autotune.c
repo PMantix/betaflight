@@ -302,6 +302,452 @@ static void resetMotorRmsAccum(void)
 }
 
 // ============================================================================
+// NEWTON'S METHOD HISTORY TRACKING
+// ============================================================================
+
+// Forward declarations - defined later but called from queue functions
+static void applyDiagnosticFix(hoverDiagPhase_e dominantPhase);
+static void triggerWiggleSignal(timeUs_t currentTimeUs);
+
+// Get the appropriate axis history for a parameter
+static axisNewtonHistory_t* getAxisHistory(int axis)
+{
+    switch (axis) {
+        case FD_ROLL:  return &runtime.newtonHistory.roll;
+        case FD_PITCH: return &runtime.newtonHistory.pitch;
+        case FD_YAW:   return &runtime.newtonHistory.yaw;
+        default:       return &runtime.newtonHistory.roll;  // Fallback
+    }
+}
+
+// Get the history buffer for a specific parameter on an axis
+static newtonHistory_t* getParameterHistory(int axis, tuneParameter_e param)
+{
+    if (param == TUNE_PARAM_GYRO_LPF1) {
+        return &runtime.newtonHistory.gyroLpf1;
+    }
+    if (param == TUNE_PARAM_GYRO_LPF2) {
+        return &runtime.newtonHistory.gyroLpf2;
+    }
+    
+    axisNewtonHistory_t *axisHist = getAxisHistory(axis);
+    switch (param) {
+        case TUNE_PARAM_P:          return &axisHist->p;
+        case TUNE_PARAM_I:          return &axisHist->i;
+        case TUNE_PARAM_D:          return &axisHist->d;
+        case TUNE_PARAM_F:          return &axisHist->f;
+        case TUNE_PARAM_DTERM_LPF1: return &axisHist->dtermLpf1;
+        default:                    return &axisHist->p;  // Fallback
+    }
+}
+
+// Record a parameter value and resulting metric to history
+static void __attribute__((unused)) recordToHistory(int axis, tuneParameter_e param, float paramValue, float metricValue)
+{
+    newtonHistory_t *history = getParameterHistory(axis, param);
+    
+    // Write to circular buffer
+    history->entries[history->writeIndex].parameterValue = paramValue;
+    history->entries[history->writeIndex].metricValue = metricValue;
+    history->entries[history->writeIndex].timestamp = micros();
+    
+    // Update write index (circular)
+    history->writeIndex = (history->writeIndex + 1) % NEWTON_HISTORY_SIZE;
+    
+    // Update count (max NEWTON_HISTORY_SIZE)
+    if (history->count < NEWTON_HISTORY_SIZE) {
+        history->count++;
+    }
+}
+
+// Get the most recent history entry
+static bool __attribute__((unused)) getLatestHistoryEntry(newtonHistory_t *history, newtonHistoryEntry_t *entry)
+{
+    if (history->count == 0) {
+        return false;
+    }
+    
+    // Most recent is at writeIndex - 1 (with wraparound)
+    uint8_t latestIndex = (history->writeIndex + NEWTON_HISTORY_SIZE - 1) % NEWTON_HISTORY_SIZE;
+    *entry = history->entries[latestIndex];
+    return true;
+}
+
+// Get the second most recent history entry
+static bool getPreviousHistoryEntry(newtonHistory_t *history, newtonHistoryEntry_t *entry)
+{
+    if (history->count < 2) {
+        return false;
+    }
+    
+    // Previous is at writeIndex - 2 (with wraparound)
+    uint8_t prevIndex = (history->writeIndex + NEWTON_HISTORY_SIZE - 2) % NEWTON_HISTORY_SIZE;
+    *entry = history->entries[prevIndex];
+    return true;
+}
+
+// Calculate sensitivity from diagnostic test result
+// sensitivity = delta_metric / delta_parameter
+static float __attribute__((unused)) calculateSensitivity(float baselineMetric, float testMetric, 
+                                   float baselineParam, float testParam)
+{
+    float deltaMetric = testMetric - baselineMetric;
+    float deltaParam = testParam - baselineParam;
+    
+    if (fabsf(deltaParam) < 0.1f) {
+        return 0.0f;  // No meaningful parameter change
+    }
+    
+    return deltaMetric / deltaParam;
+}
+
+// Get target value for a metric type
+static float __attribute__((unused)) getMetricTarget(tuneMetric_e metric)
+{
+    switch (metric) {
+        case METRIC_MOTOR_RMS:         return TARGET_MOTOR_RMS;
+        case METRIC_OSCILLATION:       return TARGET_OSCILLATION;
+        case METRIC_SETPOINT_TRACKING: return TARGET_SETPOINT_TRACKING;
+        case METRIC_STICK_TRACKING:    return TARGET_STICK_TRACKING;
+        case METRIC_LONG_TERM_ERROR:   return TARGET_LONG_TERM_ERROR;
+        case METRIC_OVERSHOOT:         return TARGET_OVERSHOOT;
+        case METRIC_SETTLING_TIME:     return TARGET_SETTLING_TIME;
+        default:                       return TARGET_MOTOR_RMS;
+    }
+}
+
+// Calculate adjustment using proportional method (when not enough history)
+// Uses sensitivity from diagnostic test
+static float calculateProportionalAdjustment(float currentParam, float currentMetric,
+                                              float target, float sensitivity)
+{
+    if (fabsf(sensitivity) < NEWTON_MIN_DERIVATIVE) {
+        return 0.0f;  // Can't calculate meaningful adjustment
+    }
+    
+    float error = currentMetric - target;
+    float adjustment = -error / sensitivity;
+    
+    // Apply 90% damping
+    adjustment *= NEWTON_DAMPING_FACTOR;
+    
+    // Clamp to max step
+    float maxStep = currentParam * (NEWTON_MAX_STEP_PERCENT / 100.0f);
+    adjustment = constrainf(adjustment, -maxStep, maxStep);
+    
+    return adjustment;
+}
+
+// Calculate adjustment using Newton's method (when we have history)
+static float __attribute__((unused)) calculateNewtonAdjustment(float currentParam, float currentMetric,
+                                        float target, newtonHistory_t *history)
+{
+    if (history->count < 2) {
+        // Not enough history - fall back to proportional with last sensitivity
+        if (fabsf(history->lastSensitivity) > NEWTON_MIN_DERIVATIVE) {
+            return calculateProportionalAdjustment(currentParam, currentMetric, 
+                                                    target, history->lastSensitivity);
+        }
+        return 0.0f;
+    }
+    
+    // Get previous entry to calculate derivative
+    newtonHistoryEntry_t prevEntry;
+    if (!getPreviousHistoryEntry(history, &prevEntry)) {
+        return 0.0f;
+    }
+    
+    // Calculate numerical derivative
+    float deltaParam = currentParam - prevEntry.parameterValue;
+    float deltaMetric = currentMetric - prevEntry.metricValue;
+    
+    if (fabsf(deltaParam) < 0.1f) {
+        return 0.0f;  // No meaningful change between iterations
+    }
+    
+    float derivative = deltaMetric / deltaParam;
+    
+    // Store sensitivity for future proportional fallback
+    history->lastSensitivity = derivative;
+    
+    // Avoid division by near-zero
+    if (fabsf(derivative) < NEWTON_MIN_DERIVATIVE) {
+        derivative = (derivative >= 0) ? NEWTON_MIN_DERIVATIVE : -NEWTON_MIN_DERIVATIVE;
+    }
+    
+    // Newton's method: new = current - f(current) / f'(current)
+    // where f(x) = metric(x) - target
+    float error = currentMetric - target;
+    float adjustment = -error / derivative;
+    
+    // Apply 90% damping for stability
+    adjustment *= NEWTON_DAMPING_FACTOR;
+    
+    // Clamp to maximum step size
+    float maxStep = currentParam * (NEWTON_MAX_STEP_PERCENT / 100.0f);
+    adjustment = constrainf(adjustment, -maxStep, maxStep);
+    
+    return adjustment;
+}
+
+// Reset all Newton history (call on mode change)
+static void __attribute__((unused)) resetNewtonHistory(void)
+{
+    memset(&runtime.newtonHistory, 0, sizeof(tuneNewtonHistory_t));
+}
+
+// Reset adjustment queue
+static void resetAdjustmentQueue(void)
+{
+    memset(&runtime.adjQueue, 0, sizeof(adjustmentQueue_t));
+    runtime.adjState = ADJ_STATE_IDLE;
+}
+
+// Queue an adjustment for sequential application
+static void queueAdjustment(hoverDiagPhase_e phase, float improvement)
+{
+    if (runtime.adjQueue.count >= ADJUSTMENT_QUEUE_SIZE) {
+        return;  // Queue full
+    }
+    
+    pendingAdjustment_t *adj = &runtime.adjQueue.queue[runtime.adjQueue.count];
+    adj->improvementPercent = improvement;
+    adj->metric = METRIC_MOTOR_RMS;
+    
+    switch (phase) {
+        case HOVER_DIAG_ROLL_TEST:
+            adj->parameter = TUNE_PARAM_P;
+            adj->axis = FD_ROLL;
+            adj->currentValue = runtime.savedSettings.rollP;
+            break;
+        case HOVER_DIAG_PITCH_TEST:
+            adj->parameter = TUNE_PARAM_P;
+            adj->axis = FD_PITCH;
+            adj->currentValue = runtime.savedSettings.pitchP;
+            break;
+        case HOVER_DIAG_GYRO_LPF1_TEST:
+            adj->parameter = TUNE_PARAM_GYRO_LPF1;
+            adj->axis = -1;  // Common
+            adj->currentValue = runtime.savedSettings.gyroLpf1Hz;
+            break;
+        case HOVER_DIAG_DTERM_LPF1_TEST:
+            adj->parameter = TUNE_PARAM_DTERM_LPF1;
+            adj->axis = -1;  // Common (applies to all axes)
+            adj->currentValue = runtime.savedSettings.dtermLpf1Hz;
+            break;
+        default:
+            return;
+    }
+    
+    runtime.adjQueue.count++;
+}
+
+// Sort adjustment queue by improvement (highest first)
+static void sortAdjustmentQueue(void)
+{
+    // Simple bubble sort - queue is small
+    for (uint8_t i = 0; i < runtime.adjQueue.count - 1; i++) {
+        for (uint8_t j = 0; j < runtime.adjQueue.count - i - 1; j++) {
+            if (runtime.adjQueue.queue[j].improvementPercent < runtime.adjQueue.queue[j+1].improvementPercent) {
+                pendingAdjustment_t temp = runtime.adjQueue.queue[j];
+                runtime.adjQueue.queue[j] = runtime.adjQueue.queue[j+1];
+                runtime.adjQueue.queue[j+1] = temp;
+            }
+        }
+    }
+}
+
+// Apply the next adjustment from the queue
+// Returns the phase that was applied (for reason code)
+static hoverDiagPhase_e applyNextQueuedAdjustment(void)
+{
+    if (runtime.adjQueue.currentIndex >= runtime.adjQueue.count) {
+        return HOVER_DIAG_IDLE;  // No more adjustments
+    }
+    
+    pendingAdjustment_t *adj = &runtime.adjQueue.queue[runtime.adjQueue.currentIndex];
+    
+    // Convert back to diagnostic phase for applyDiagnosticFix
+    hoverDiagPhase_e phase = HOVER_DIAG_IDLE;
+    switch (adj->parameter) {
+        case TUNE_PARAM_P:
+            phase = (adj->axis == FD_ROLL) ? HOVER_DIAG_ROLL_TEST : HOVER_DIAG_PITCH_TEST;
+            break;
+        case TUNE_PARAM_GYRO_LPF1:
+            phase = HOVER_DIAG_GYRO_LPF1_TEST;
+            break;
+        case TUNE_PARAM_DTERM_LPF1:
+            phase = HOVER_DIAG_DTERM_LPF1_TEST;
+            break;
+        default:
+            break;
+    }
+    
+    if (phase != HOVER_DIAG_IDLE) {
+        // Store pre-adjustment RMS for verification
+        runtime.adjQueue.preAdjustMetric = runtime.lastMotorRms;
+        
+        // Store current parameter value for potential revert
+        runtime.adjQueue.preAdjustParamValue = adj->currentValue;
+        
+        // Apply the fix using Newton's method
+        applyDiagnosticFix(phase);
+    }
+    
+    return phase;
+}
+
+// Revert an adjustment that made things worse
+static void revertAdjustment(pendingAdjustment_t *adj)
+{
+    float revertValue = runtime.adjQueue.preAdjustParamValue;
+    
+    switch (adj->parameter) {
+        case TUNE_PARAM_P:
+            if (adj->axis == FD_ROLL) {
+                // Revert Roll gains - approximate by restoring P and scaling others
+                float scale = revertValue / (float)currentPidProfile->pid[FD_ROLL].P;
+                currentPidProfile->pid[FD_ROLL].P = (uint8_t)revertValue;
+                currentPidProfile->pid[FD_ROLL].I = (uint8_t)constrainf(currentPidProfile->pid[FD_ROLL].I * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                currentPidProfile->pid[FD_ROLL].D = (uint8_t)constrainf(currentPidProfile->pid[FD_ROLL].D * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                pidInitConfig(currentPidProfile);
+            } else if (adj->axis == FD_PITCH) {
+                float scale = revertValue / (float)currentPidProfile->pid[FD_PITCH].P;
+                currentPidProfile->pid[FD_PITCH].P = (uint8_t)revertValue;
+                currentPidProfile->pid[FD_PITCH].I = (uint8_t)constrainf(currentPidProfile->pid[FD_PITCH].I * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                currentPidProfile->pid[FD_PITCH].D = (uint8_t)constrainf(currentPidProfile->pid[FD_PITCH].D * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                pidInitConfig(currentPidProfile);
+            }
+            break;
+            
+        case TUNE_PARAM_GYRO_LPF1:
+            if (runtime.savedSettings.gyroLpf1IsDynamic) {
+                gyroConfigMutable()->gyro_lpf1_dyn_min_hz = (uint16_t)revertValue;
+                gyro.dynLpfMin = (uint16_t)revertValue;
+            } else {
+                gyroConfigMutable()->gyro_lpf1_static_hz = (uint16_t)revertValue;
+                gyroInitFilters();
+            }
+            break;
+            
+        case TUNE_PARAM_DTERM_LPF1:
+            if (runtime.savedSettings.dtermLpf1IsDynamic) {
+                currentPidProfile->dterm_lpf1_dyn_min_hz = (uint16_t)revertValue;
+                pidRuntime.dynLpfMin = (uint16_t)revertValue;
+            } else {
+                currentPidProfile->dterm_lpf1_static_hz = (uint16_t)revertValue;
+                pidInitFilters(currentPidProfile);
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
+// Sequential adjustment state machine
+// Returns true when all adjustments are complete
+static bool updateSequentialAdjustment(timeUs_t currentTimeUs)
+{
+    // Accumulate motor samples while measuring
+    if (runtime.adjState == ADJ_STATE_MEASURING) {
+        accumulateMotorRms();
+    }
+    
+    switch (runtime.adjState) {
+        case ADJ_STATE_IDLE:
+            return true;  // Nothing to do
+            
+        case ADJ_STATE_APPLY_NEXT:
+            if (runtime.adjQueue.currentIndex >= runtime.adjQueue.count) {
+                // All adjustments complete - trigger wiggle signal
+                triggerWiggleSignal(currentTimeUs);
+                
+                runtime.adjState = ADJ_STATE_COMPLETE;
+                runtime.diagIteration++;
+                
+                // Check max iterations
+                if (runtime.diagIteration >= DIAG_MAX_ITERATIONS) {
+                    runtime.lastReasonCode = REASON_DIAG_MAX_ITERATIONS;
+                    return true;
+                }
+                
+                // Restart diagnostic cycle to verify all fixes
+                runtime.diagPhase = HOVER_DIAG_BASELINE;
+                runtime.adjState = ADJ_STATE_IDLE;
+                // Clear RMS array for next cycle
+                for (int i = 0; i < HOVER_DIAG_PHASE_COUNT; i++) {
+                    runtime.diagRms[i] = 0.0f;
+                    runtime.diagImprovement[i] = 0.0f;
+                }
+                return false;  // Continue tuning
+            }
+            
+            // Apply next adjustment
+            {
+                hoverDiagPhase_e appliedPhase = applyNextQueuedAdjustment();
+                if (appliedPhase != HOVER_DIAG_IDLE) {
+                    runtime.adjState = ADJ_STATE_MEASURING;
+                    runtime.adjPhaseStartTime = currentTimeUs;
+                    resetMotorRmsAccum();
+                } else {
+                    // Skip invalid adjustment
+                    runtime.adjQueue.currentIndex++;
+                }
+            }
+            break;
+            
+        case ADJ_STATE_MEASURING:
+            // Wait for measurement window (500ms)
+            if (cmpTimeUs(currentTimeUs, runtime.adjPhaseStartTime) < MOTOR_RMS_WINDOW_US) {
+                return false;  // Still measuring
+            }
+            runtime.adjState = ADJ_STATE_VERIFY;
+            // Fall through
+            // fallthrough
+            
+        case ADJ_STATE_VERIFY:
+        {
+            // Compute RMS after adjustment
+            float postRms = computeWindowedMotorRms();
+            resetMotorRmsAccum();
+            runtime.lastMotorRms = postRms;
+            
+            // Calculate improvement vs pre-adjustment
+            float improvement = (runtime.adjQueue.preAdjustMetric - postRms) 
+                               / runtime.adjQueue.preAdjustMetric * 100.0f;
+            
+            if (improvement < -5.0f) {
+                // Made things worse by more than 5% - revert
+                runtime.adjState = ADJ_STATE_REVERT;
+            } else {
+                // Acceptable or improved - move to next
+                runtime.adjQueue.currentIndex++;
+                runtime.adjState = ADJ_STATE_APPLY_NEXT;
+            }
+            break;
+        }
+            
+        case ADJ_STATE_REVERT:
+        {
+            pendingAdjustment_t *adj = &runtime.adjQueue.queue[runtime.adjQueue.currentIndex];
+            revertAdjustment(adj);
+            
+            // Skip this parameter, try next
+            runtime.adjQueue.currentIndex++;
+            runtime.adjState = ADJ_STATE_APPLY_NEXT;
+            break;
+        }
+            
+        case ADJ_STATE_COMPLETE:
+            runtime.adjState = ADJ_STATE_IDLE;
+            return true;
+    }
+    
+    return false;
+}
+
+// ============================================================================
 // PROCEDURAL DIAGNOSTIC HOVER TUNE
 // ============================================================================
 // Replaces heuristic noise attribution with controlled A/B testing.
@@ -435,60 +881,145 @@ static void applyDiagnosticTest(hoverDiagPhase_e phase)
 }
 
 // Apply permanent fix for the dominant contributor
+// Now uses calculated adjustment based on sensitivity from diagnostic test
 static void applyDiagnosticFix(hoverDiagPhase_e dominantPhase)
 {
+    float baselineRms = runtime.diagRms[HOVER_DIAG_BASELINE];
+    float testRms = runtime.diagRms[dominantPhase];
+    float target = MOTOR_RMS_TARGET;
+    
     switch (dominantPhase) {
         case HOVER_DIAG_ROLL_TEST:
-            // Permanently halve Roll gains
+        {
             runtime.lastReasonCode = REASON_DIAG_FIX_ROLL;
-            currentPidProfile->pid[FD_ROLL].P = runtime.savedSettings.rollP / 2;
-            currentPidProfile->pid[FD_ROLL].I = runtime.savedSettings.rollI / 2;
-            currentPidProfile->pid[FD_ROLL].D = runtime.savedSettings.rollD / 2;
-            currentPidProfile->pid[FD_ROLL].F = runtime.savedSettings.rollF / 2;
+            
+            // Test used 50% gains, calculate sensitivity
+            // sensitivity = (testRms - baselineRms) / (testP - baselineP)
+            // testP = baselineP * 0.5, so delta = -0.5 * baselineP
+            float baselineP = runtime.savedSettings.rollP;
+            float testP = baselineP * 0.5f;
+            float sensitivity = calculateSensitivity(baselineRms, testRms, baselineP, testP);
+            
+            // Calculate adjustment using Newton's method with history
+            newtonHistory_t *history = getParameterHistory(FD_ROLL, TUNE_PARAM_P);
+            float adjustment;
+            if (history->count >= 2) {
+                adjustment = calculateNewtonAdjustment(baselineP, baselineRms, target, history);
+            } else {
+                // Use proportional adjustment from sensitivity
+                history->lastSensitivity = sensitivity;  // Store for future use
+                adjustment = calculateProportionalAdjustment(baselineP, baselineRms, target, sensitivity);
+            }
+            
+            // Apply adjustment to all Roll gains (proportionally)
+            float scale = 1.0f + (adjustment / baselineP);  // Convert P adjustment to scale
+            scale = constrainf(scale, 0.3f, 1.0f);  // Never less than 30% or more than 100%
+            
+            currentPidProfile->pid[FD_ROLL].P = (uint8_t)constrainf(runtime.savedSettings.rollP * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            currentPidProfile->pid[FD_ROLL].I = (uint8_t)constrainf(runtime.savedSettings.rollI * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            currentPidProfile->pid[FD_ROLL].D = (uint8_t)constrainf(runtime.savedSettings.rollD * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            currentPidProfile->pid[FD_ROLL].F = (uint16_t)constrainf(runtime.savedSettings.rollF * scale, 0, 2000);
+            
+            // Record to history for next iteration
+            recordToHistory(FD_ROLL, TUNE_PARAM_P, currentPidProfile->pid[FD_ROLL].P, testRms);
+            
             pidInitConfig(currentPidProfile);
             break;
+        }
             
         case HOVER_DIAG_PITCH_TEST:
-            // Permanently halve Pitch gains
+        {
             runtime.lastReasonCode = REASON_DIAG_FIX_PITCH;
-            currentPidProfile->pid[FD_PITCH].P = runtime.savedSettings.pitchP / 2;
-            currentPidProfile->pid[FD_PITCH].I = runtime.savedSettings.pitchI / 2;
-            currentPidProfile->pid[FD_PITCH].D = runtime.savedSettings.pitchD / 2;
-            currentPidProfile->pid[FD_PITCH].F = runtime.savedSettings.pitchF / 2;
+            
+            float baselineP = runtime.savedSettings.pitchP;
+            float testP = baselineP * 0.5f;
+            float sensitivity = calculateSensitivity(baselineRms, testRms, baselineP, testP);
+            
+            newtonHistory_t *history = getParameterHistory(FD_PITCH, TUNE_PARAM_P);
+            float adjustment;
+            if (history->count >= 2) {
+                adjustment = calculateNewtonAdjustment(baselineP, baselineRms, target, history);
+            } else {
+                history->lastSensitivity = sensitivity;
+                adjustment = calculateProportionalAdjustment(baselineP, baselineRms, target, sensitivity);
+            }
+            
+            float scale = 1.0f + (adjustment / baselineP);
+            scale = constrainf(scale, 0.3f, 1.0f);
+            
+            currentPidProfile->pid[FD_PITCH].P = (uint8_t)constrainf(runtime.savedSettings.pitchP * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            currentPidProfile->pid[FD_PITCH].I = (uint8_t)constrainf(runtime.savedSettings.pitchI * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            currentPidProfile->pid[FD_PITCH].D = (uint8_t)constrainf(runtime.savedSettings.pitchD * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            currentPidProfile->pid[FD_PITCH].F = (uint16_t)constrainf(runtime.savedSettings.pitchF * scale, 0, 2000);
+            
+            recordToHistory(FD_PITCH, TUNE_PARAM_P, currentPidProfile->pid[FD_PITCH].P, testRms);
+            
             pidInitConfig(currentPidProfile);
             break;
+        }
             
         case HOVER_DIAG_GYRO_LPF1_TEST:
-            // Permanently lower Gyro LPF1 by 50Hz
+        {
             runtime.lastReasonCode = REASON_DIAG_FIX_GYRO_LPF1;
-            {
-                uint16_t newHz = (runtime.savedSettings.gyroLpf1Hz > DIAG_FILTER_STEP_HZ + GYRO_LPF1_MIN_HZ) ?
-                    runtime.savedSettings.gyroLpf1Hz - DIAG_FILTER_STEP_HZ : GYRO_LPF1_MIN_HZ;
-                if (runtime.savedSettings.gyroLpf1IsDynamic) {
-                    gyroConfigMutable()->gyro_lpf1_dyn_min_hz = newHz;
-                    gyro.dynLpfMin = newHz;
-                } else {
-                    gyroConfigMutable()->gyro_lpf1_static_hz = newHz;
-                    gyroInitFilters();
-                }
+            
+            float baselineHz = runtime.savedSettings.gyroLpf1Hz;
+            float testHz = baselineHz - DIAG_FILTER_STEP_HZ;
+            float sensitivity = calculateSensitivity(baselineRms, testRms, baselineHz, testHz);
+            
+            newtonHistory_t *history = &runtime.newtonHistory.gyroLpf1;
+            float adjustment;
+            if (history->count >= 2) {
+                adjustment = calculateNewtonAdjustment(baselineHz, baselineRms, target, history);
+            } else {
+                history->lastSensitivity = sensitivity;
+                adjustment = calculateProportionalAdjustment(baselineHz, baselineRms, target, sensitivity);
+            }
+            
+            // adjustment is Hz change (negative = lower filter)
+            uint16_t newHz = (uint16_t)constrainf(baselineHz + adjustment, GYRO_LPF1_MIN_HZ, GYRO_LPF1_MAX_HZ);
+            
+            recordToHistory(-1, TUNE_PARAM_GYRO_LPF1, newHz, testRms);
+            
+            if (runtime.savedSettings.gyroLpf1IsDynamic) {
+                gyroConfigMutable()->gyro_lpf1_dyn_min_hz = newHz;
+                gyro.dynLpfMin = newHz;
+            } else {
+                gyroConfigMutable()->gyro_lpf1_static_hz = newHz;
+                gyroInitFilters();
             }
             break;
+        }
             
         case HOVER_DIAG_DTERM_LPF1_TEST:
-            // Permanently lower Dterm LPF1 by 50Hz
+        {
             runtime.lastReasonCode = REASON_DIAG_FIX_DTERM_LPF1;
-            {
-                uint16_t newHz = (runtime.savedSettings.dtermLpf1Hz > DIAG_FILTER_STEP_HZ + DTERM_LPF1_MIN_HZ) ?
-                    runtime.savedSettings.dtermLpf1Hz - DIAG_FILTER_STEP_HZ : DTERM_LPF1_MIN_HZ;
-                if (runtime.savedSettings.dtermLpf1IsDynamic) {
-                    currentPidProfile->dterm_lpf1_dyn_min_hz = newHz;
-                    pidRuntime.dynLpfMin = newHz;
-                } else {
-                    currentPidProfile->dterm_lpf1_static_hz = newHz;
-                    pidInitFilters(currentPidProfile);
-                }
+            
+            float baselineHz = runtime.savedSettings.dtermLpf1Hz;
+            float testHz = baselineHz - DIAG_FILTER_STEP_HZ;
+            float sensitivity = calculateSensitivity(baselineRms, testRms, baselineHz, testHz);
+            
+            newtonHistory_t *history = getParameterHistory(FD_ROLL, TUNE_PARAM_DTERM_LPF1);  // Dterm is common
+            float adjustment;
+            if (history->count >= 2) {
+                adjustment = calculateNewtonAdjustment(baselineHz, baselineRms, target, history);
+            } else {
+                history->lastSensitivity = sensitivity;
+                adjustment = calculateProportionalAdjustment(baselineHz, baselineRms, target, sensitivity);
+            }
+            
+            uint16_t newHz = (uint16_t)constrainf(baselineHz + adjustment, DTERM_LPF1_MIN_HZ, DTERM_LPF1_MAX_HZ);
+            
+            recordToHistory(FD_ROLL, TUNE_PARAM_DTERM_LPF1, newHz, testRms);
+            
+            if (runtime.savedSettings.dtermLpf1IsDynamic) {
+                currentPidProfile->dterm_lpf1_dyn_min_hz = newHz;
+                pidRuntime.dynLpfMin = newHz;
+            } else {
+                currentPidProfile->dterm_lpf1_static_hz = newHz;
+                pidInitFilters(currentPidProfile);
             }
             break;
+        }
             
         default:
             break;
@@ -587,46 +1118,44 @@ static bool updateHoverDiagnostic(timeUs_t currentTimeUs)
             runtime.diagImprovement[HOVER_DIAG_DTERM_LPF1_TEST] = 
                 (safeBase - runtime.diagRms[HOVER_DIAG_DTERM_LPF1_TEST]) / safeBase * 100.0f;
             
-            // Find dominant contributor (highest improvement %)
-            float maxImprovement = 0.0f;
-            hoverDiagPhase_e dominant = HOVER_DIAG_IDLE;
-            
+            // Queue ALL tests that showed >10% improvement (sequential multi-variable)
+            resetAdjustmentQueue();
             for (int i = HOVER_DIAG_ROLL_TEST; i <= HOVER_DIAG_DTERM_LPF1_TEST; i++) {
-                if (runtime.diagImprovement[i] > maxImprovement) {
-                    maxImprovement = runtime.diagImprovement[i];
-                    dominant = (hoverDiagPhase_e)i;
+                if (runtime.diagImprovement[i] >= DIAG_IMPROVEMENT_THRESHOLD) {
+                    queueAdjustment((hoverDiagPhase_e)i, runtime.diagImprovement[i]);
                 }
             }
             
-            // Apply fix if dominant contributor showed >10% improvement
-            if (maxImprovement >= DIAG_IMPROVEMENT_THRESHOLD && dominant != HOVER_DIAG_IDLE) {
-                applyDiagnosticFix(dominant);
-                runtime.diagIteration++;
-                
-                // Check max iterations
-                if (runtime.diagIteration >= DIAG_MAX_ITERATIONS) {
-                    runtime.lastReasonCode = REASON_DIAG_MAX_ITERATIONS;
-                    runtime.diagPhase = HOVER_DIAG_COMPLETE;
-                    return true;
-                }
-                
-                // Restart diagnostic cycle to verify fix
-                runtime.diagPhase = HOVER_DIAG_BASELINE;
-                // Clear RMS array for next cycle
-                for (int i = 0; i < HOVER_DIAG_PHASE_COUNT; i++) {
-                    runtime.diagRms[i] = 0.0f;
-                    runtime.diagImprovement[i] = 0.0f;
-                }
-            } else {
-                // No significant improvement found
+            // If no improvements found, we're done
+            if (runtime.adjQueue.count == 0) {
                 runtime.lastReasonCode = REASON_DIAG_NO_IMPROVEMENT;
                 runtime.diagPhase = HOVER_DIAG_COMPLETE;
                 return true;
+            }
+            
+            // Sort queue by improvement (highest first)
+            sortAdjustmentQueue();
+            
+            // Start sequential adjustment process
+            runtime.adjState = ADJ_STATE_APPLY_NEXT;
+            runtime.diagPhase = HOVER_DIAG_COMPLETE;  // Will be overridden if we continue
+            
+            // Apply first adjustment
+            hoverDiagPhase_e appliedPhase = applyNextQueuedAdjustment();
+            if (appliedPhase != HOVER_DIAG_IDLE) {
+                runtime.adjState = ADJ_STATE_MEASURING;
+                runtime.adjPhaseStartTime = currentTimeUs;
+                resetMotorRmsAccum();
             }
             break;
         }
             
         case HOVER_DIAG_COMPLETE:
+            // Check if we're in sequential adjustment mode
+            if (runtime.adjState != ADJ_STATE_IDLE && runtime.adjState != ADJ_STATE_COMPLETE) {
+                // Continue sequential adjustment processing
+                return updateSequentialAdjustment(currentTimeUs);
+            }
             return true;
             
         default:
@@ -860,6 +1389,13 @@ static void resetSamples(void)
 // Track hover calibration wiggle separately from iteration wiggle
 static timeUs_t hoverCalibratedWiggleStart = 0;
 static bool hoverWiggleActive = false;
+
+// Trigger a wiggle signal (called from various places when adjustments complete)
+static void triggerWiggleSignal(timeUs_t currentTimeUs)
+{
+    hoverCalibratedWiggleStart = currentTimeUs;
+    hoverWiggleActive = true;
+}
 
 static float getWiggleSignal(timeUs_t currentTimeUs)
 {
@@ -1133,8 +1669,10 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                 if (runtime.hoverTuneActive && isHoverStable()) {
                     runtime.status = STATUS_COLLECTING_DATA;  // Show we're doing something
                     if (updateHoverDiagnostic(currentTimeUs)) {
-                        // Diagnostic tuning complete
+                        // Diagnostic tuning complete - wiggle to signal ready for maneuvers
                         runtime.hoverTuneActive = false;
+                        hoverCalibratedWiggleStart = currentTimeUs;
+                        hoverWiggleActive = true;
                         // Reason code already set by updateHoverDiagnostic
                     }
                     // Don't detect maneuvers while hover tuning - wait for stable baseline

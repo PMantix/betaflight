@@ -345,6 +345,119 @@ typedef struct {
 } autotuneFilterAnalysis_t;
 
 // ============================================================================
+// NEWTON'S METHOD HISTORY TRACKING
+// ============================================================================
+
+// History tracking for calculated adjustments
+#define NEWTON_HISTORY_SIZE         5       // Track last 5 parameter/metric pairs
+#define NEWTON_DAMPING_FACTOR       0.90f   // Apply 90% of calculated change
+#define NEWTON_MAX_STEP_PERCENT     50.0f   // Never change more than 50% at once
+#define NEWTON_MIN_DERIVATIVE       0.1f    // Avoid division by near-zero
+
+// Tune metric types - each PID term optimizes for a different metric
+typedef enum {
+    METRIC_MOTOR_RMS = 0,           // Hover tune - motor noise
+    METRIC_OSCILLATION,             // D term - high-frequency oscillation
+    METRIC_SETPOINT_TRACKING,       // P term - response to setpoint
+    METRIC_STICK_TRACKING,          // F term - tracking during rapid moves
+    METRIC_LONG_TERM_ERROR,         // I term - accumulated drift/offset
+    METRIC_OVERSHOOT,               // Step response overshoot %
+    METRIC_SETTLING_TIME,           // Step response settling time
+    METRIC_COUNT
+} tuneMetric_e;
+
+// Target values for each metric
+#define TARGET_MOTOR_RMS            15.0f   // Motor RMS target
+#define TARGET_OSCILLATION          5.0f    // Low oscillation amplitude
+#define TARGET_SETPOINT_TRACKING    0.95f   // 95% tracking accuracy
+#define TARGET_STICK_TRACKING       0.90f   // 90% during rapid moves  
+#define TARGET_LONG_TERM_ERROR      2.0f    // Minimal accumulated error
+#define TARGET_OVERSHOOT            10.0f   // 10% max overshoot
+#define TARGET_SETTLING_TIME        150.0f  // 150ms settling time
+
+// Tunable parameter types
+typedef enum {
+    TUNE_PARAM_P = 0,
+    TUNE_PARAM_I,
+    TUNE_PARAM_D,
+    TUNE_PARAM_F,
+    TUNE_PARAM_DTERM_LPF1,
+    TUNE_PARAM_DTERM_LPF2,
+    TUNE_PARAM_GYRO_LPF1,
+    TUNE_PARAM_GYRO_LPF2,
+    TUNE_PARAM_COUNT
+} tuneParameter_e;
+
+// Single history entry: parameter value and resulting metric
+typedef struct {
+    float parameterValue;           // e.g., P gain = 45
+    float metricValue;              // e.g., motor RMS = 72.5
+    timeUs_t timestamp;
+} newtonHistoryEntry_t;
+
+// History buffer for one parameter
+typedef struct {
+    newtonHistoryEntry_t entries[NEWTON_HISTORY_SIZE];
+    uint8_t count;                  // Number of valid entries (0-5)
+    uint8_t writeIndex;             // Next write position (circular)
+    float lastSensitivity;          // Last calculated sensitivity
+} newtonHistory_t;
+
+// Per-axis history for all tunable parameters
+typedef struct {
+    newtonHistory_t p;
+    newtonHistory_t i;
+    newtonHistory_t d;
+    newtonHistory_t f;
+    newtonHistory_t dtermLpf1;
+} axisNewtonHistory_t;
+
+// Complete tune history (per-axis + common filters)
+typedef struct {
+    axisNewtonHistory_t roll;
+    axisNewtonHistory_t pitch;
+    axisNewtonHistory_t yaw;
+    newtonHistory_t gyroLpf1;       // Common to all axes
+    newtonHistory_t gyroLpf2;       // Common to all axes
+} tuneNewtonHistory_t;
+
+// ============================================================================
+// SEQUENTIAL MULTI-VARIABLE ADJUSTMENT
+// ============================================================================
+
+// Pending adjustment in the queue
+typedef struct {
+    tuneParameter_e parameter;      // Which parameter to adjust
+    int8_t axis;                    // FD_ROLL, FD_PITCH, FD_YAW or -1 for common
+    float currentValue;             // Current parameter value
+    float calculatedAdjustment;     // Calculated change (with 90% damping)
+    float sensitivityEstimate;      // From diagnostic test
+    float improvementPercent;       // Expected improvement
+    tuneMetric_e metric;            // Which metric this optimizes
+} pendingAdjustment_t;
+
+#define ADJUSTMENT_QUEUE_SIZE       8   // Max pending adjustments
+
+// Adjustment queue for sequential application
+typedef struct {
+    pendingAdjustment_t queue[ADJUSTMENT_QUEUE_SIZE];
+    uint8_t count;                  // Number of pending adjustments
+    uint8_t currentIndex;           // Currently applying this one
+    float preAdjustMetric;          // Metric before current adjustment
+    float preAdjustParamValue;      // Parameter value before adjustment (for revert)
+} adjustmentQueue_t;
+
+// State machine for sequential adjustment
+typedef enum {
+    ADJ_STATE_IDLE = 0,
+    ADJ_STATE_APPLY_NEXT,           // Apply next adjustment from queue
+    ADJ_STATE_MEASURING,            // Measure result of adjustment
+    ADJ_STATE_VERIFY,               // Check if adjustment helped or hurt
+    ADJ_STATE_REVERT,               // Revert if adjustment made things worse
+    ADJ_STATE_COMPLETE,             // All adjustments verified, wiggle
+} adjustmentState_e;
+
+// ============================================================================
 // MAIN RUNTIME STATE
 // ============================================================================
 
@@ -439,6 +552,14 @@ typedef struct {
     
     // Debug reason code (explains what autotune is doing/did)
     uint16_t lastReasonCode;
+    
+    // Newton's method history tracking (per-axis)
+    tuneNewtonHistory_t newtonHistory;
+    
+    // Sequential multi-variable adjustment
+    adjustmentQueue_t adjQueue;
+    adjustmentState_e adjState;
+    timeUs_t adjPhaseStartTime;     // When current adjustment phase started
     
 } autotuneRuntime_t;
 
