@@ -506,12 +506,12 @@ Newton calculates optimal F from response delay
 
 ## Next Steps
 
-1. [ ] Implement history tracking infrastructure (per-axis `tuneHistory_t`)
-2. [ ] Add term-specific metric measurement functions
-3. [ ] Add sensitivity calculation after diagnostic tests
-4. [ ] Implement `calculateNewtonAdjustment()` with 90% damping
-5. [ ] Implement sequential multi-variable adjustment queue
-6. [ ] Integrate with `applyDiagnosticFix()` to use calculated adjustments
-7. [ ] Add wiggle signal when all adjustments verified
-8. [ ] Test and tune convergence parameters
+1. [x] Implement history tracking infrastructure (per-axis `tuneNewtonHistory_t`)
+2. [ ] Add term-specific metric measurement functions (for PID tune mode)
+3. [x] Add sensitivity calculation after diagnostic tests
+4. [x] Implement `calculateNewtonAdjustment()` with 90% damping
+5. [x] Implement sequential multi-variable adjustment queue
+6. [x] Integrate with `applyDiagnosticFix()` to use calculated adjustments
+7. [x] Add wiggle signal when all adjustments verified
+8. [ ] Test and tune convergence parameters (flight test required)
 9. [ ] Extend to PID tune mode
