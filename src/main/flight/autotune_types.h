@@ -142,6 +142,7 @@
 #define REASON_DIAG_PITCH_TEST          1520    // Testing with Pitch * 0.5
 #define REASON_DIAG_GYRO_LPF1_TEST      1530    // Testing with Gyro LPF1 - 50Hz
 #define REASON_DIAG_DTERM_LPF1_TEST     1540    // Testing with Dterm LPF1 - 50Hz
+#define REASON_DIAG_VERIFY_BASELINE     1545    // Reconfirm baseline after tests complete
 #define REASON_DIAG_ANALYZING           1550    // Analyzing results
 #define REASON_DIAG_FIX_ROLL            1560    // Identified Roll as dominant, applying fix
 #define REASON_DIAG_FIX_PITCH           1561    // Identified Pitch as dominant, applying fix
@@ -160,6 +161,7 @@
 #define REASON_FILTER_NOISE_LOW_LPF     2310    // Noise low, raising LPF
 #define REASON_FILTER_NOISE_OK          2400    // Noise in acceptable range
 #define REASON_FILTER_NO_CHANGE         2500    // No change needed/possible
+#define REASON_FILTER_AT_LIMIT          2600    // All filters at limit, can't adjust further
 #define REASON_FILTER_COMPLETE          2999    // Filter tune complete
 
 // PID tune reasons (3xxx)
@@ -173,7 +175,10 @@
 #define REASON_PID_OSCILLATION_P_DOWN   3320    // Oscillation detected, reducing P
 #define REASON_PID_NOISE_D_DOWN         3410    // Noise high, reducing D
 #define REASON_PID_RESPONSE_GOOD        3500    // Response good, no change
-#define REASON_PID_COMPLETE             3999    // PID tune complete
+#define REASON_PID_AT_LIMIT             3600    // Gains at min/max, can't adjust further
+#define REASON_ROLL_COMPLETE            3910    // Roll axis tuning complete
+#define REASON_PITCH_COMPLETE           3920    // Pitch axis tuning complete
+#define REASON_PID_COMPLETE             3999    // PID tune complete (all axes)
 
 // I-term tune reasons (34xx)
 #define REASON_PID_DRIFT_I_UP           3420    // Drift detected, raising I
@@ -220,13 +225,15 @@ typedef enum {
 
 // Procedural hover diagnostic phases
 // Each phase applies one test, measures for 500ms, then restores settings
+// Note: RMS is computed at END of each phase, so debug output shows PREVIOUS phase's result
 typedef enum {
     HOVER_DIAG_IDLE = 0,            // Not running diagnostics
-    HOVER_DIAG_BASELINE,            // Measuring with current settings
+    HOVER_DIAG_BASELINE,            // Measuring with current settings (initial)
     HOVER_DIAG_ROLL_TEST,           // Roll gains * 0.5
     HOVER_DIAG_PITCH_TEST,          // Pitch gains * 0.5  
     HOVER_DIAG_GYRO_LPF1_TEST,      // Gyro LPF1 - 50Hz
     HOVER_DIAG_DTERM_LPF1_TEST,     // Dterm LPF1 - 50Hz
+    HOVER_DIAG_VERIFY_BASELINE,     // Reconfirm baseline after all tests (settings restored)
     HOVER_DIAG_ANALYZING,           // Comparing results
     HOVER_DIAG_COMPLETE,            // Diagnostic cycle done
     HOVER_DIAG_PHASE_COUNT
@@ -419,6 +426,7 @@ typedef struct {
     axisNewtonHistory_t yaw;
     newtonHistory_t gyroLpf1;       // Common to all axes
     newtonHistory_t gyroLpf2;       // Common to all axes
+    newtonHistory_t dtermLpf1;      // Common D-term filter
 } tuneNewtonHistory_t;
 
 // ============================================================================
@@ -485,6 +493,11 @@ typedef struct {
     int8_t hoverThrottle;           // Calibrated hover throttle (percent)
     bool hoverCalibrated;           // True once we've established hover reference
     timeUs_t hoverStableStartTime;  // When stable hover was first detected
+    
+    // Per-axis/mode completion tracking
+    bool rollComplete;              // Roll axis tuning finished (at limit or excellent)
+    bool pitchComplete;             // Pitch axis tuning finished
+    bool filterComplete;            // Filter tuning finished
     
     // Hover-based motor RMS tuning (Phase 0)
     bool hoverTuneActive;           // Currently doing hover-based filter tuning

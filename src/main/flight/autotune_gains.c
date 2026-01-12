@@ -415,27 +415,28 @@ bool autotuneApplyFilterAdjustment(
         // Lower LPF cutoffs to be below the peak frequency
         float targetCutoff = filterAnalysis->peakFrequency * 0.7f;  // 30% below peak
         
-        // Lower dterm LPF1 first (most sensitive to noise reaching motors)
+        // Check if ANY filter is still above targetCutoff and can be lowered
+        // Priority: dterm LPF1 > dterm LPF2 > gyro LPF1 (most to least impact on motor output)
         if (dtermLpf1Hz > DTERM_LPF1_MIN_HZ && dtermLpf1Hz > targetCutoff) {
             dtermLpf1Hz = MAX(dtermLpf1Hz - FILTER_STEP_HZ, DTERM_LPF1_MIN_HZ);
             reason = REASON_FILTER_RESONANCE_LPF;
             changed = true;
-        }
-        // Also lower dterm LPF2 if enabled
-        else if (dtermLpf2Hz > DTERM_LPF2_MIN_HZ && dtermLpf2Hz > 0 && dtermLpf2Hz > targetCutoff) {
+        } else if (dtermLpf2Hz > DTERM_LPF2_MIN_HZ && dtermLpf2Hz > 0 && dtermLpf2Hz > targetCutoff) {
             dtermLpf2Hz = MAX(dtermLpf2Hz - FILTER_STEP_HZ, DTERM_LPF2_MIN_HZ);
             reason = REASON_FILTER_RESONANCE_LPF;
             changed = true;
-        }
-        // If dterm filters are already low, also lower gyro filters (only if enabled)
-        else if (dtermLpf1Hz <= DTERM_LPF1_MIN_HZ && gyroLpf1Hz > 0 && gyroLpf1Hz > GYRO_LPF1_MIN_HZ && gyroLpf1Hz > targetCutoff) {
+        } else if (gyroLpf1Hz > 0 && gyroLpf1Hz > GYRO_LPF1_MIN_HZ && gyroLpf1Hz > targetCutoff) {
+            // Lower gyro LPF1 if it's above targetCutoff (don't require dterm at min first)
             gyroLpf1Hz = MAX(gyroLpf1Hz - FILTER_STEP_HZ, GYRO_LPF1_MIN_HZ);
             reason = REASON_FILTER_RESONANCE_LPF;
             changed = true;
-        } else {
-            reason = REASON_AT_LIMIT;
         }
-    } else {
+        // If all filters are already below targetCutoff, resonance is adequately filtered
+        // Fall through to noise-based adjustment below
+    }
+    
+    // Noise-based filter adjustment (also reached if resonance is already adequately filtered)
+    if (!changed) {
         // NO resonance detected - adjust filters based on noise level
         
         // Calculate noise ratio (how far are we from target?)

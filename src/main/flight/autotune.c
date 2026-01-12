@@ -308,6 +308,7 @@ static void resetMotorRmsAccum(void)
 // Forward declarations - defined later but called from queue functions
 static void applyDiagnosticFix(hoverDiagPhase_e dominantPhase);
 static void triggerWiggleSignal(timeUs_t currentTimeUs);
+static void triggerFinishedWiggle(timeUs_t currentTimeUs);
 
 // Get the appropriate axis history for a parameter
 static axisNewtonHistory_t* getAxisHistory(int axis)
@@ -342,7 +343,7 @@ static newtonHistory_t* getParameterHistory(int axis, tuneParameter_e param)
 }
 
 // Record a parameter value and resulting metric to history
-static void __attribute__((unused)) recordToHistory(int axis, tuneParameter_e param, float paramValue, float metricValue)
+static void recordToHistory(int axis, tuneParameter_e param, float paramValue, float metricValue)
 {
     newtonHistory_t *history = getParameterHistory(axis, param);
     
@@ -388,7 +389,7 @@ static bool getPreviousHistoryEntry(newtonHistory_t *history, newtonHistoryEntry
 
 // Calculate sensitivity from diagnostic test result
 // sensitivity = delta_metric / delta_parameter
-static float __attribute__((unused)) calculateSensitivity(float baselineMetric, float testMetric, 
+static float calculateSensitivity(float baselineMetric, float testMetric, 
                                    float baselineParam, float testParam)
 {
     float deltaMetric = testMetric - baselineMetric;
@@ -497,14 +498,14 @@ static void __attribute__((unused)) resetNewtonHistory(void)
 }
 
 // Reset adjustment queue
-static void resetAdjustmentQueue(void)
+static void __attribute__((unused)) resetAdjustmentQueue(void)
 {
     memset(&runtime.adjQueue, 0, sizeof(adjustmentQueue_t));
     runtime.adjState = ADJ_STATE_IDLE;
 }
 
-// Queue an adjustment for sequential application
-static void queueAdjustment(hoverDiagPhase_e phase, float improvement)
+// Queue an adjustment for sequential application (used in PID tune mode)
+static void __attribute__((unused)) queueAdjustment(hoverDiagPhase_e phase, float improvement)
 {
     if (runtime.adjQueue.count >= ADJUSTMENT_QUEUE_SIZE) {
         return;  // Queue full
@@ -542,8 +543,8 @@ static void queueAdjustment(hoverDiagPhase_e phase, float improvement)
     runtime.adjQueue.count++;
 }
 
-// Sort adjustment queue by improvement (highest first)
-static void sortAdjustmentQueue(void)
+// Sort adjustment queue by improvement (highest first) - used in PID tune mode
+static void __attribute__((unused)) sortAdjustmentQueue(void)
 {
     // Simple bubble sort - queue is small
     for (uint8_t i = 0; i < runtime.adjQueue.count - 1; i++) {
@@ -557,9 +558,9 @@ static void sortAdjustmentQueue(void)
     }
 }
 
-// Apply the next adjustment from the queue
+// Apply the next adjustment from the queue (used in PID tune mode)
 // Returns the phase that was applied (for reason code)
-static hoverDiagPhase_e applyNextQueuedAdjustment(void)
+static hoverDiagPhase_e __attribute__((unused)) applyNextQueuedAdjustment(void)
 {
     if (runtime.adjQueue.currentIndex >= runtime.adjQueue.count) {
         return HOVER_DIAG_IDLE;  // No more adjustments
@@ -597,8 +598,8 @@ static hoverDiagPhase_e applyNextQueuedAdjustment(void)
     return phase;
 }
 
-// Revert an adjustment that made things worse
-static void revertAdjustment(pendingAdjustment_t *adj)
+// Revert an adjustment that made things worse (used in PID tune mode)
+static void __attribute__((unused)) revertAdjustment(pendingAdjustment_t *adj)
 {
     float revertValue = runtime.adjQueue.preAdjustParamValue;
     
@@ -645,9 +646,9 @@ static void revertAdjustment(pendingAdjustment_t *adj)
     }
 }
 
-// Sequential adjustment state machine
+// Sequential adjustment state machine (used in PID tune mode)
 // Returns true when all adjustments are complete
-static bool updateSequentialAdjustment(timeUs_t currentTimeUs)
+static bool __attribute__((unused)) updateSequentialAdjustment(timeUs_t currentTimeUs)
 {
     // Accumulate motor samples while measuring
     if (runtime.adjState == ADJ_STATE_MEASURING) {
@@ -880,6 +881,61 @@ static void applyDiagnosticTest(hoverDiagPhase_e phase)
     }
 }
 
+// Record sensitivity measurements from all diagnostic tests
+// This populates Newton history for later use in PID tune mode
+static void recordDiagnosticSensitivities(void)
+{
+    float baselineRms = runtime.diagRms[HOVER_DIAG_BASELINE];
+    
+    // Roll PID sensitivity
+    {
+        float baselineP = runtime.savedSettings.rollP;
+        float testP = baselineP * 0.5f;  // Test used 50% gains
+        float testRms = runtime.diagRms[HOVER_DIAG_ROLL_TEST];
+        float sensitivity = calculateSensitivity(baselineRms, testRms, baselineP, testP);
+        
+        newtonHistory_t *history = getParameterHistory(FD_ROLL, TUNE_PARAM_P);
+        history->lastSensitivity = sensitivity;
+        recordToHistory(FD_ROLL, TUNE_PARAM_P, baselineP, baselineRms);
+    }
+    
+    // Pitch PID sensitivity
+    {
+        float baselineP = runtime.savedSettings.pitchP;
+        float testP = baselineP * 0.5f;
+        float testRms = runtime.diagRms[HOVER_DIAG_PITCH_TEST];
+        float sensitivity = calculateSensitivity(baselineRms, testRms, baselineP, testP);
+        
+        newtonHistory_t *history = getParameterHistory(FD_PITCH, TUNE_PARAM_P);
+        history->lastSensitivity = sensitivity;
+        recordToHistory(FD_PITCH, TUNE_PARAM_P, baselineP, baselineRms);
+    }
+    
+    // Gyro LPF1 sensitivity
+    {
+        float baselineHz = runtime.savedSettings.gyroLpf1Hz;
+        float testHz = baselineHz - DIAG_FILTER_STEP_HZ;
+        float testRms = runtime.diagRms[HOVER_DIAG_GYRO_LPF1_TEST];
+        float sensitivity = calculateSensitivity(baselineRms, testRms, baselineHz, testHz);
+        
+        newtonHistory_t *history = &runtime.newtonHistory.gyroLpf1;
+        history->lastSensitivity = sensitivity;
+        recordToHistory(-1, TUNE_PARAM_GYRO_LPF1, baselineHz, baselineRms);
+    }
+    
+    // D-term LPF1 sensitivity
+    {
+        float baselineHz = runtime.savedSettings.dtermLpf1Hz;
+        float testHz = baselineHz - DIAG_FILTER_STEP_HZ;
+        float testRms = runtime.diagRms[HOVER_DIAG_DTERM_LPF1_TEST];
+        float sensitivity = calculateSensitivity(baselineRms, testRms, baselineHz, testHz);
+        
+        newtonHistory_t *history = &runtime.newtonHistory.dtermLpf1;
+        history->lastSensitivity = sensitivity;
+        recordToHistory(-1, TUNE_PARAM_DTERM_LPF1, baselineHz, baselineRms);
+    }
+}
+
 // Apply permanent fix for the dominant contributor
 // Now uses calculated adjustment based on sensitivity from diagnostic test
 static void applyDiagnosticFix(hoverDiagPhase_e dominantPhase)
@@ -1037,11 +1093,12 @@ static bool updateHoverDiagnostic(timeUs_t currentTimeUs)
     if (cmpTimeUs(currentTimeUs, runtime.lastMotorRmsTime) < MOTOR_RMS_WINDOW_US) {
         // Still measuring - show current phase in reason code
         switch (runtime.diagPhase) {
-            case HOVER_DIAG_BASELINE:     runtime.lastReasonCode = REASON_DIAG_BASELINE; break;
-            case HOVER_DIAG_ROLL_TEST:    runtime.lastReasonCode = REASON_DIAG_ROLL_TEST; break;
-            case HOVER_DIAG_PITCH_TEST:   runtime.lastReasonCode = REASON_DIAG_PITCH_TEST; break;
+            case HOVER_DIAG_BASELINE:       runtime.lastReasonCode = REASON_DIAG_BASELINE; break;
+            case HOVER_DIAG_ROLL_TEST:      runtime.lastReasonCode = REASON_DIAG_ROLL_TEST; break;
+            case HOVER_DIAG_PITCH_TEST:     runtime.lastReasonCode = REASON_DIAG_PITCH_TEST; break;
             case HOVER_DIAG_GYRO_LPF1_TEST: runtime.lastReasonCode = REASON_DIAG_GYRO_LPF1_TEST; break;
             case HOVER_DIAG_DTERM_LPF1_TEST: runtime.lastReasonCode = REASON_DIAG_DTERM_LPF1_TEST; break;
+            case HOVER_DIAG_VERIFY_BASELINE: runtime.lastReasonCode = REASON_DIAG_VERIFY_BASELINE; break;
             default: break;
         }
         return false;
@@ -1093,8 +1150,15 @@ static bool updateHoverDiagnostic(timeUs_t currentTimeUs)
             break;
             
         case HOVER_DIAG_DTERM_LPF1_TEST:
-            // All tests complete - restore and analyze
+            // D-term test complete - restore and verify baseline
+            // This ensures settings are restored and we can compare DTERM_LPF1 properly
             restoreDiagnosticSettings();
+            runtime.diagPhase = HOVER_DIAG_VERIFY_BASELINE;
+            break;
+            
+        case HOVER_DIAG_VERIFY_BASELINE:
+            // Verify baseline complete - now we can analyze with all data
+            // The RMS just measured confirms settings are properly restored
             runtime.diagPhase = HOVER_DIAG_ANALYZING;
             // Fall through to analysis immediately
             // fallthrough
@@ -1118,44 +1182,42 @@ static bool updateHoverDiagnostic(timeUs_t currentTimeUs)
             runtime.diagImprovement[HOVER_DIAG_DTERM_LPF1_TEST] = 
                 (safeBase - runtime.diagRms[HOVER_DIAG_DTERM_LPF1_TEST]) / safeBase * 100.0f;
             
-            // Queue ALL tests that showed >10% improvement (sequential multi-variable)
-            resetAdjustmentQueue();
+            // STEP 1: Record sensitivities for ALL tests (for later PID tune use)
+            // This populates Newton history even if we don't apply fixes
+            recordDiagnosticSensitivities();
+            
+            // STEP 2: Find the SINGLE BEST improvement
+            float bestImprovement = 0.0f;
+            hoverDiagPhase_e bestPhase = HOVER_DIAG_IDLE;
+            
             for (int i = HOVER_DIAG_ROLL_TEST; i <= HOVER_DIAG_DTERM_LPF1_TEST; i++) {
-                if (runtime.diagImprovement[i] >= DIAG_IMPROVEMENT_THRESHOLD) {
-                    queueAdjustment((hoverDiagPhase_e)i, runtime.diagImprovement[i]);
+                if (runtime.diagImprovement[i] > bestImprovement) {
+                    bestImprovement = runtime.diagImprovement[i];
+                    bestPhase = (hoverDiagPhase_e)i;
                 }
             }
             
-            // If no improvements found, we're done
-            if (runtime.adjQueue.count == 0) {
+            // STEP 3: Apply ONLY the best fix if noise is above target
+            if (baselineRms > MOTOR_RMS_TARGET && bestImprovement >= DIAG_IMPROVEMENT_THRESHOLD) {
+                // Apply the single best fix to get into acceptable range
+                applyDiagnosticFix(bestPhase);
+            } else if (baselineRms <= MOTOR_RMS_TARGET) {
+                runtime.lastReasonCode = REASON_DIAG_TARGET_REACHED;
+            } else {
                 runtime.lastReasonCode = REASON_DIAG_NO_IMPROVEMENT;
-                runtime.diagPhase = HOVER_DIAG_COMPLETE;
-                return true;
             }
             
-            // Sort queue by improvement (highest first)
-            sortAdjustmentQueue();
-            
-            // Start sequential adjustment process
-            runtime.adjState = ADJ_STATE_APPLY_NEXT;
-            runtime.diagPhase = HOVER_DIAG_COMPLETE;  // Will be overridden if we continue
-            
-            // Apply first adjustment
-            hoverDiagPhase_e appliedPhase = applyNextQueuedAdjustment();
-            if (appliedPhase != HOVER_DIAG_IDLE) {
-                runtime.adjState = ADJ_STATE_MEASURING;
-                runtime.adjPhaseStartTime = currentTimeUs;
-                resetMotorRmsAccum();
-            }
-            break;
+            // STEP 4: Hover diagnostic complete - trigger wiggle and exit
+            // We've recorded sensitivities and applied at most one fix
+            // Ready to start real PID tune
+            triggerWiggleSignal(currentTimeUs);
+            runtime.diagPhase = HOVER_DIAG_COMPLETE;
+            return true;  // Diagnostic phase done
         }
             
         case HOVER_DIAG_COMPLETE:
-            // Check if we're in sequential adjustment mode
-            if (runtime.adjState != ADJ_STATE_IDLE && runtime.adjState != ADJ_STATE_COMPLETE) {
-                // Continue sequential adjustment processing
-                return updateSequentialAdjustment(currentTimeUs);
-            }
+            // Hover diagnostic is complete - we should not get here in normal flow
+            // since we return true above, but handle it just in case
             return true;
             
         default:
@@ -1389,12 +1451,22 @@ static void resetSamples(void)
 // Track hover calibration wiggle separately from iteration wiggle
 static timeUs_t hoverCalibratedWiggleStart = 0;
 static bool hoverWiggleActive = false;
+static bool finishedWiggleActive = false;  // Special "axis complete" wiggle
 
 // Trigger a wiggle signal (called from various places when adjustments complete)
 static void triggerWiggleSignal(timeUs_t currentTimeUs)
 {
     hoverCalibratedWiggleStart = currentTimeUs;
     hoverWiggleActive = true;
+    finishedWiggleActive = false;
+}
+
+// Trigger a special "finished" wiggle (longer, pulsing pattern for axis completion)
+static void triggerFinishedWiggle(timeUs_t currentTimeUs)
+{
+    hoverCalibratedWiggleStart = currentTimeUs;
+    hoverWiggleActive = true;
+    finishedWiggleActive = true;  // Flag for special pattern
 }
 
 static float getWiggleSignal(timeUs_t currentTimeUs)
@@ -1402,6 +1474,34 @@ static float getWiggleSignal(timeUs_t currentTimeUs)
     // Check for hover calibration wiggle (works in ARMED state)
     if (hoverWiggleActive && runtime.state == AUTOTUNE_STATE_ARMED) {
         const timeUs_t elapsed = cmpTimeUs(currentTimeUs, hoverCalibratedWiggleStart);
+        
+        // Finished wiggle: longer, pulsing pattern (3 bursts with pauses)
+        if (finishedWiggleActive) {
+            const float wigglePeriodUs = 60000;   // 60ms period (faster)
+            const float wiggleAmplitude = 120.0f; // Stronger amplitude
+            const timeUs_t burstDuration = 300000;   // 300ms burst
+            const timeUs_t pauseDuration = 200000;   // 200ms pause
+            const timeUs_t cycleTime = burstDuration + pauseDuration;
+            
+            // 3 bursts total = 1.5 seconds
+            if (elapsed > cycleTime * 3) {
+                hoverWiggleActive = false;
+                finishedWiggleActive = false;
+                return 0.0f;
+            }
+            
+            // Check if in burst or pause
+            timeUs_t cyclePhase = elapsed % cycleTime;
+            if (cyclePhase >= burstDuration) {
+                return 0.0f;  // In pause
+            }
+            
+            // In burst - wiggle
+            float phase = (float)(cyclePhase % (uint32_t)wigglePeriodUs) / wigglePeriodUs * 2.0f * M_PIf;
+            return wiggleAmplitude * sinf(phase);
+        }
+        
+        // Regular hover wiggle
         const float wigglePeriodUs = 80000;   // 80ms period
         const float wiggleAmplitude = 100.0f;
         
@@ -1618,6 +1718,11 @@ void autotuneUpdate(timeUs_t currentTimeUs)
         runtime.bestScore = 1000.0f;
         runtime.status = STATUS_WAITING_MANEUVER;
         
+        // Reset per-axis completion flags
+        runtime.rollComplete = false;
+        runtime.pitchComplete = false;
+        runtime.filterComplete = false;
+        
         // Reset hover tune state
         runtime.hoverTuneActive = false;
         runtime.hoverTuneIteration = 0;
@@ -1649,19 +1754,33 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                         hoverCalibratedWiggleStart = currentTimeUs;
                         hoverWiggleActive = true;
                         
-                        // Start hover-based diagnostic tuning (Phase 0)
-                        runtime.hoverTuneActive = true;
-                        runtime.lastMotorRmsTime = currentTimeUs;
-                        runtime.diagPhase = HOVER_DIAG_BASELINE;
-                        runtime.diagIteration = 0;
-                        resetMotorRmsAccum();
-                        // Clear diagnostic arrays
-                        for (int i = 0; i < HOVER_DIAG_PHASE_COUNT; i++) {
-                            runtime.diagRms[i] = 0.0f;
-                            runtime.diagImprovement[i] = 0.0f;
-                        }
+                        // DON'T start diagnostic yet - wait for wiggle to complete
+                        // The wiggle would corrupt baseline noise measurement
+                        runtime.hoverTuneActive = false;  // Will be set true after wiggle
                     }
                     break;
+                }
+                
+                // Wait for hover calibration wiggle to complete before starting diagnostic
+                if (hoverWiggleActive) {
+                    // Wiggle still in progress - don't start diagnostic yet
+                    runtime.lastReasonCode = REASON_HOVER_WAITING;
+                    break;
+                }
+                
+                // Wiggle complete - now start diagnostic if not already running
+                if (!runtime.hoverTuneActive && runtime.diagPhase == HOVER_DIAG_IDLE) {
+                    // Start hover-based diagnostic tuning (Phase 0)
+                    runtime.hoverTuneActive = true;
+                    runtime.lastMotorRmsTime = currentTimeUs;
+                    runtime.diagPhase = HOVER_DIAG_BASELINE;
+                    runtime.diagIteration = 0;
+                    resetMotorRmsAccum();
+                    // Clear diagnostic arrays
+                    for (int i = 0; i < HOVER_DIAG_PHASE_COUNT; i++) {
+                        runtime.diagRms[i] = 0.0f;
+                        runtime.diagImprovement[i] = 0.0f;
+                    }
                 }
                 
                 // Phase 0: Procedural diagnostic hover tune
@@ -1940,6 +2059,13 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                             &runtime.lastReasonCode
                         );
                         runtime.iteration++;
+                        
+                        // Check if filter tuning hit limit (nothing left to change)
+                        if (runtime.lastReasonCode == REASON_AT_LIMIT || 
+                            runtime.lastReasonCode == REASON_FILTER_NOISE_OK) {
+                            runtime.filterComplete = true;
+                            runtime.lastReasonCode = REASON_FILTER_COMPLETE;
+                        }
                     } else {
                         // Apply gain adjustments
                         switch (runtime.attribution.primary) {
@@ -1967,24 +2093,41 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                             &runtime.lastReasonCode
                         );
                         runtime.iteration++;
+                        
+                        // Check if this axis hit limit or achieved excellent response
+                        if (runtime.lastReasonCode == REASON_AT_LIMIT ||
+                            runtime.lastReasonCode == REASON_PID_RESPONSE_GOOD ||
+                            runtime.responseClass == RESPONSE_EXCELLENT) {
+                            // Mark this axis as complete
+                            if (runtime.currentAxis == FD_ROLL) {
+                                runtime.rollComplete = true;
+                                runtime.lastReasonCode = REASON_ROLL_COMPLETE;
+                            } else if (runtime.currentAxis == FD_PITCH) {
+                                runtime.pitchComplete = true;
+                                runtime.lastReasonCode = REASON_PITCH_COMPLETE;
+                            }
+                        }
                     }
                 }
                 
-                // Check for convergence (only if we have valid data this round)
-                if (runtime.dataValid && autotuneCheckConvergence(&runtime)) {
+                // Check if current mode/axis is complete (no max iterations limit)
+                bool axisComplete = false;
+                if (runtime.tuneMode == TUNE_MODE_FILTER) {
+                    axisComplete = runtime.filterComplete;
+                } else if (runtime.tuneMode == TUNE_MODE_ROLL) {
+                    axisComplete = runtime.rollComplete;
+                } else if (runtime.tuneMode == TUNE_MODE_PITCH) {
+                    axisComplete = runtime.pitchComplete;
+                }
+                
+                if (axisComplete) {
+                    // This axis/mode is done - special finished wiggle and return to ARMED
+                    // (Stay available for other axes)
                     autotuneRestoreBestGains(&runtime);
-                    changeState(AUTOTUNE_STATE_COMPLETE, currentTimeUs);
-                    runtime.status = STATUS_COMPLETE;
-                    runtime.lastReasonCode = (runtime.tuneMode == TUNE_MODE_FILTER) ? 
-                                             REASON_FILTER_COMPLETE : REASON_PID_COMPLETE;
-                } else if (runtime.iteration >= autotuneConfig()->max_iterations) {
-                    autotuneRestoreBestGains(&runtime);
-                    changeState(AUTOTUNE_STATE_COMPLETE, currentTimeUs);
-                    runtime.status = STATUS_COMPLETE;
-                    runtime.lastReasonCode = (runtime.tuneMode == TUNE_MODE_FILTER) ? 
-                                             REASON_FILTER_COMPLETE : REASON_PID_COMPLETE;
+                    triggerFinishedWiggle(currentTimeUs);
+                    changeState(AUTOTUNE_STATE_ARMED, currentTimeUs);
                 } else if (cmpTimeUs(currentTimeUs, runtime.stateEnteredAt) > 100000) {
-                    // Signal ready for next maneuver
+                    // Not complete yet - signal ready for next maneuver
                     changeState(AUTOTUNE_STATE_SIGNALING, currentTimeUs);
                     runtime.wiggleStartTime = currentTimeUs;
                     runtime.wigglePhase = 0;

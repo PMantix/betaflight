@@ -13,36 +13,87 @@ Reason codes follow the format `XYZZ` where:
 
 ## Category 1xxx: Hover Tune (Phase 0)
 
-Hover tune runs automatically after arming when autotune is enabled. It adjusts D-term LPF and D gain to minimize motor command noise while hovering with sticks centered.
+Hover tune runs automatically after arming when autotune is enabled. It runs a **procedural diagnostic** to identify noise sources and applies fixes to get into an acceptable range before PID tuning.
+
+### Hover Tune States (10xx)
 
 | Code | Name | Description |
 |------|------|-------------|
 | 1000 | `REASON_HOVER_WAITING` | Waiting for stable hover (calibrating hover throttle reference) |
 | 1001 | `REASON_HOVER_MEASURING` | Actively measuring motor RMS during 500ms window |
-| 1110 | `REASON_HOVER_RMS_HIGH_D_DOWN` | Motor RMS above target (15), reducing D gain by 5 |
-| 1120 | `REASON_HOVER_RMS_HIGH_LPF_DOWN` | Motor RMS above target (15), lowering dterm_lpf1 by 10Hz |
-| 1210 | `REASON_HOVER_RMS_LOW_LPF_UP` | Motor RMS excellent (<8), raising dterm_lpf1 by 10Hz to improve response |
-| 1220 | `REASON_HOVER_RMS_LOW_D_UP` | Motor RMS excellent, raising D gain (currently unused) |
-| 1300 | `REASON_HOVER_STABLE` | Motor RMS stable for 3+ iterations or in acceptable range - converged |
-| 1999 | `REASON_HOVER_COMPLETE` | Hover tune complete (hit max iterations or converged) |
+| 1300 | `REASON_HOVER_STABLE` | Motor RMS stable, converged |
+| 1999 | `REASON_HOVER_COMPLETE` | Hover tune complete |
+
+### Procedural Diagnostic (15xx)
+
+The hover diagnostic runs A/B tests to measure sensitivity to each noise source:
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1500 | `REASON_DIAG_BASELINE` | Measuring baseline RMS (500ms) |
+| 1510 | `REASON_DIAG_ROLL_TEST` | Testing with Roll PIDs at 50% |
+| 1520 | `REASON_DIAG_PITCH_TEST` | Testing with Pitch PIDs at 50% |
+| 1530 | `REASON_DIAG_GYRO_LPF1_TEST` | Testing with Gyro LPF1 lowered 50Hz |
+| 1540 | `REASON_DIAG_DTERM_LPF1_TEST` | Testing with D-term LPF1 lowered 50Hz |
+| 1545 | `REASON_DIAG_VERIFY_BASELINE` | Reconfirm baseline after tests (settings restored) |
+| 1550 | `REASON_DIAG_ANALYZING` | Analyzing test results, calculating improvements |
+| 1560 | `REASON_DIAG_FIX_ROLL` | Roll identified as best fix, applying adjustment |
+| 1561 | `REASON_DIAG_FIX_PITCH` | Pitch identified as best fix, applying adjustment |
+| 1562 | `REASON_DIAG_FIX_GYRO_LPF1` | Gyro LPF1 identified as best fix, applying adjustment |
+| 1563 | `REASON_DIAG_FIX_DTERM_LPF1` | D-term LPF1 identified as best fix, applying adjustment |
+| 1570 | `REASON_DIAG_NO_IMPROVEMENT` | No test showed >10% improvement |
+| 1580 | `REASON_DIAG_TARGET_REACHED` | Motor RMS already within target (<15) |
+| 1590 | `REASON_DIAG_MAX_ITERATIONS` | Max diagnostic iterations reached |
+
+### Noise Source Attribution (11xx - legacy)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1100 | `REASON_HOVER_GYRO_LPF1_DOWN` | Gyro noise high, lowering gyro LPF1 |
+| 1101 | `REASON_HOVER_GYRO_LPF2_DOWN` | Gyro noise high, lowering gyro LPF2 |
+| 1102 | `REASON_HOVER_GYRO_AT_LIMIT` | Gyro filters at minimum |
+| 1120 | `REASON_HOVER_DTERM_LPF1_DOWN` | D-term noisy, lowering dterm LPF1 |
+| 1121 | `REASON_HOVER_DTERM_LPF2_DOWN` | D-term noisy, lowering dterm LPF2 |
+| 1122 | `REASON_HOVER_DTERM_D_DOWN` | D-term noisy, reducing D gain |
+| 1123 | `REASON_HOVER_DTERM_AT_LIMIT` | D-term filters at minimum |
+| 1130 | `REASON_HOVER_POSC_P_DOWN` | P oscillation, reducing P gain |
+| 1131 | `REASON_HOVER_POSC_D_UP` | P oscillation, raising D for damping |
+| 1132 | `REASON_HOVER_POSC_AT_LIMIT` | P oscillation but at limits |
+
+### Low Noise Relaxation (114x - legacy)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1140 | `REASON_HOVER_RELAX_DTERM_LPF1` | Excellent RMS, raising dterm LPF1 |
+| 1141 | `REASON_HOVER_RELAX_DTERM_LPF2` | Excellent RMS, raising dterm LPF2 |
+| 1142 | `REASON_HOVER_RELAX_GYRO_LPF1` | Excellent RMS, raising gyro LPF1 |
+| 1143 | `REASON_HOVER_RELAX_GYRO_LPF2` | Excellent RMS, raising gyro LPF2 |
+| 1144 | `REASON_HOVER_RELAX_D_UP` | Excellent RMS, raising D gain |
+| 1145 | `REASON_HOVER_RELAX_AT_MAX` | Already at max filter/gain settings |
 
 **Note:** Category 9xxx codes can also appear during hover tune:
-- `9300` (AT_LIMIT): All filters at minimum and D gain at minimum, cannot reduce further
+- `9100` (GRACE_PERIOD): In grace period after maneuver detection
+- `9300` (AT_LIMIT): Parameter already at minimum/maximum limit
 
-### Hover Tune Decision Logic
+### Hover Diagnostic Flow
 
 ```
-Motor RMS > 15 (target)?
-  ├─ Yes → dterm_lpf1 > 50Hz?
-  │         ├─ Yes → Lower LPF by 10Hz (1120)
-  │         └─ No → D gain > 15?
-  │                  ├─ Yes → Lower D by 5 (1110)
-  │                  └─ No → At limit (9300)
-  └─ No → Motor RMS < 8 (excellent)?
-           ├─ Yes → dterm_lpf1 < 150Hz?
-           │         ├─ Yes → Raise LPF by 10Hz (1210)
-           │         └─ No → At limit (9300)
-           └─ No → In acceptable range, done (1300)
+1. HOVER_WAITING (1000) - Wait for stable hover + calibration wiggle to complete
+2. DIAG_BASELINE (1500) - Measure baseline noise (500ms)
+3. If baseline <= target: DIAG_TARGET_REACHED (1580) → wiggle → done
+4. Run diagnostic tests (each 500ms, then restore):
+   - DIAG_ROLL_TEST (1510) - 50% Roll PIDs
+   - DIAG_PITCH_TEST (1520) - 50% Pitch PIDs  
+   - DIAG_GYRO_LPF1_TEST (1530) - Gyro LPF1 - 50Hz
+   - DIAG_DTERM_LPF1_TEST (1540) - D-term LPF1 - 50Hz
+5. DIAG_VERIFY_BASELINE (1545) - Reconfirm baseline with settings restored
+6. DIAG_ANALYZING (1550) - Calculate improvements, record sensitivities
+7. Apply BEST fix if noise > target (156x codes)
+8. Wiggle → Ready for PID tune
+
+Note: RMS is computed at the END of each 500ms window. Debug output shows:
+- debug[2] = Previous phase's base RMS × 10
+- debug[3] = Just-completed phase's RMS × 10
 ```
 
 ---
@@ -163,17 +214,29 @@ When `set debug_mode = AUTOTUNE`:
 
 **Note:** For LPF1 filters, the displayed value is `dyn_min_hz` if dynamic mode is active, otherwise `static_hz`.
 
-### During Hover Tune (mode 4)
+### During Hover Diagnostic (mode 4)
 | Channel | Value |
 |---------|-------|
 | debug[0] | State (0-9) |
-| debug[1] | iteration×10 + 4 (e.g., 24 = iteration 2, hover mode) |
-| debug[2] | dterm_lpf1 frequency (Hz) - dynamic min or static |
-| debug[3] | D gain (roll) |
-| debug[4] | gyro_lpf1 frequency (Hz) - dynamic min or static |
-| debug[5] | Best motor RMS × 10 |
-| debug[6] | Current motor RMS × 10 |
+| debug[1] | phase×10 + iteration (e.g., 20 = ROLL_TEST phase, iteration 0) |
+| debug[2] | Baseline RMS × 10 (measured during BASELINE phase) |
+| debug[3] | Previous RMS × 10 (from just-completed phase) |
+| debug[4] | Roll improvement % |
+| debug[5] | Pitch improvement % |
+| debug[6] | Filter improvement % (best of gyro/dterm) |
 | debug[7] | **Reason code** |
+
+**Important timing note:** RMS is computed at the END of each 500ms window. When you see reason code 1520 (PITCH_TEST), `debug[3]` shows the RMS from the just-completed ROLL_TEST phase, not the current PITCH_TEST which is still being measured.
+
+**Phase values in debug[1]:**
+- 0 = IDLE/WAITING
+- 1 = BASELINE measurement
+- 2 = ROLL_TEST
+- 3 = PITCH_TEST
+- 4 = GYRO_LPF1_TEST
+- 5 = DTERM_LPF1_TEST
+- 6 = VERIFY_BASELINE
+- 7 = Applying FIX
 
 ### During Filter Tune (mode 3)
 | Channel | Value |
