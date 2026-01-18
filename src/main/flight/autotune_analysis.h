@@ -63,6 +63,56 @@ void autotuneAnalyzeNoise(
 bool autotuneIsNoiseAcceptable(float noiseRms, float targetNoise);
 
 // ============================================================================
+// TERM-SPECIFIC METRIC MEASUREMENT FUNCTIONS
+// ============================================================================
+
+// Get the appropriate metric type for a tunable parameter
+tuneMetric_e getMetricForParameter(tuneParameter_e param);
+
+// Get target value for a specific metric type
+float getTargetForMetric(tuneMetric_e metric);
+
+// Measure oscillation amplitude for D-term optimization
+// Returns peak-to-peak oscillation amplitude in the settling region
+float measureOscillation(
+    const float *gyroSamples,
+    const float *dtermSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+);
+
+// Measure setpoint tracking accuracy for P-term optimization
+// Returns tracking accuracy as percentage (0-100%, higher is better)
+float measureSetpointTracking(
+    const float *gyroSamples,
+    const float *setpointSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+);
+
+// Measure stick tracking during rapid movements for F-term optimization
+// Returns velocity-weighted lag (lower is better, 0 = perfect tracking)
+float measureStickTracking(
+    const float *gyroSamples,
+    const float *setpointSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+);
+
+// Measure long-term error/drift for I-term optimization
+// Returns accumulated error over time (lower is better)
+float measureLongTermError(
+    const float *gyroSamples,
+    const float *setpointSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+);
+
+// Get metric value from pre-computed metrics structure
+// Convenient wrapper for Newton's method to get the right metric
+float getMetricFromAnalysis(const autotuneMetrics_t *metrics, tuneMetric_e metricType);
+
+// ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
 

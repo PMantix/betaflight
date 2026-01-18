@@ -184,6 +184,7 @@ static bool isThrottleInRange(void)
 // These values are motor command standard deviation (0-1000 scale)
 #define MOTOR_RMS_TARGET        15.0f   // Target: below 15 is good
 #define MOTOR_RMS_EXCELLENT      8.0f   // Excellent: can try relaxing filters
+#define MOTOR_RMS_RELAXED_MAX   15.0f   // Max acceptable RMS after relaxation
 #define MOTOR_RMS_WINDOW_US     500000  // 500ms measurement window
 #define MOTOR_RMS_MAX_ITER      10      // Max hover tune iterations
 
@@ -362,7 +363,8 @@ static void recordToHistory(int axis, tuneParameter_e param, float paramValue, f
 }
 
 // Get the most recent history entry
-static bool __attribute__((unused)) getLatestHistoryEntry(newtonHistory_t *history, newtonHistoryEntry_t *entry)
+__attribute__((unused))
+static bool getLatestHistoryEntry(newtonHistory_t *history, newtonHistoryEntry_t *entry)
 {
     if (history->count == 0) {
         return false;
@@ -403,7 +405,8 @@ static float calculateSensitivity(float baselineMetric, float testMetric,
 }
 
 // Get target value for a metric type
-static float __attribute__((unused)) getMetricTarget(tuneMetric_e metric)
+__attribute__((unused))
+static float getMetricTarget(tuneMetric_e metric)
 {
     switch (metric) {
         case METRIC_MOTOR_RMS:         return TARGET_MOTOR_RMS;
@@ -440,7 +443,7 @@ static float calculateProportionalAdjustment(float currentParam, float currentMe
 }
 
 // Calculate adjustment using Newton's method (when we have history)
-static float __attribute__((unused)) calculateNewtonAdjustment(float currentParam, float currentMetric,
+static float calculateNewtonAdjustment(float currentParam, float currentMetric,
                                         float target, newtonHistory_t *history)
 {
     if (history->count < 2) {
@@ -492,75 +495,14 @@ static float __attribute__((unused)) calculateNewtonAdjustment(float currentPara
 }
 
 // Reset all Newton history (call on mode change)
-static void __attribute__((unused)) resetNewtonHistory(void)
+static void resetNewtonHistory(void)
 {
     memset(&runtime.newtonHistory, 0, sizeof(tuneNewtonHistory_t));
 }
 
-// Reset adjustment queue
-static void __attribute__((unused)) resetAdjustmentQueue(void)
-{
-    memset(&runtime.adjQueue, 0, sizeof(adjustmentQueue_t));
-    runtime.adjState = ADJ_STATE_IDLE;
-}
-
-// Queue an adjustment for sequential application (used in PID tune mode)
-static void __attribute__((unused)) queueAdjustment(hoverDiagPhase_e phase, float improvement)
-{
-    if (runtime.adjQueue.count >= ADJUSTMENT_QUEUE_SIZE) {
-        return;  // Queue full
-    }
-    
-    pendingAdjustment_t *adj = &runtime.adjQueue.queue[runtime.adjQueue.count];
-    adj->improvementPercent = improvement;
-    adj->metric = METRIC_MOTOR_RMS;
-    
-    switch (phase) {
-        case HOVER_DIAG_ROLL_TEST:
-            adj->parameter = TUNE_PARAM_P;
-            adj->axis = FD_ROLL;
-            adj->currentValue = runtime.savedSettings.rollP;
-            break;
-        case HOVER_DIAG_PITCH_TEST:
-            adj->parameter = TUNE_PARAM_P;
-            adj->axis = FD_PITCH;
-            adj->currentValue = runtime.savedSettings.pitchP;
-            break;
-        case HOVER_DIAG_GYRO_LPF1_TEST:
-            adj->parameter = TUNE_PARAM_GYRO_LPF1;
-            adj->axis = -1;  // Common
-            adj->currentValue = runtime.savedSettings.gyroLpf1Hz;
-            break;
-        case HOVER_DIAG_DTERM_LPF1_TEST:
-            adj->parameter = TUNE_PARAM_DTERM_LPF1;
-            adj->axis = -1;  // Common (applies to all axes)
-            adj->currentValue = runtime.savedSettings.dtermLpf1Hz;
-            break;
-        default:
-            return;
-    }
-    
-    runtime.adjQueue.count++;
-}
-
-// Sort adjustment queue by improvement (highest first) - used in PID tune mode
-static void __attribute__((unused)) sortAdjustmentQueue(void)
-{
-    // Simple bubble sort - queue is small
-    for (uint8_t i = 0; i < runtime.adjQueue.count - 1; i++) {
-        for (uint8_t j = 0; j < runtime.adjQueue.count - i - 1; j++) {
-            if (runtime.adjQueue.queue[j].improvementPercent < runtime.adjQueue.queue[j+1].improvementPercent) {
-                pendingAdjustment_t temp = runtime.adjQueue.queue[j];
-                runtime.adjQueue.queue[j] = runtime.adjQueue.queue[j+1];
-                runtime.adjQueue.queue[j+1] = temp;
-            }
-        }
-    }
-}
-
-// Apply the next adjustment from the queue (used in PID tune mode)
+// Apply the next adjustment from the queue
 // Returns the phase that was applied (for reason code)
-static hoverDiagPhase_e __attribute__((unused)) applyNextQueuedAdjustment(void)
+static hoverDiagPhase_e applyNextQueuedAdjustment(void)
 {
     if (runtime.adjQueue.currentIndex >= runtime.adjQueue.count) {
         return HOVER_DIAG_IDLE;  // No more adjustments
@@ -598,8 +540,8 @@ static hoverDiagPhase_e __attribute__((unused)) applyNextQueuedAdjustment(void)
     return phase;
 }
 
-// Revert an adjustment that made things worse (used in PID tune mode)
-static void __attribute__((unused)) revertAdjustment(pendingAdjustment_t *adj)
+// Revert an adjustment that made things worse
+static void revertAdjustment(pendingAdjustment_t *adj)
 {
     float revertValue = runtime.adjQueue.preAdjustParamValue;
     
@@ -646,9 +588,9 @@ static void __attribute__((unused)) revertAdjustment(pendingAdjustment_t *adj)
     }
 }
 
-// Sequential adjustment state machine (used in PID tune mode)
+// Sequential adjustment state machine
 // Returns true when all adjustments are complete
-static bool __attribute__((unused)) updateSequentialAdjustment(timeUs_t currentTimeUs)
+static bool updateSequentialAdjustment(timeUs_t currentTimeUs)
 {
     // Accumulate motor samples while measuring
     if (runtime.adjState == ADJ_STATE_MEASURING) {
@@ -881,9 +823,130 @@ static void applyDiagnosticTest(hoverDiagPhase_e phase)
     }
 }
 
+// ============================================================================
+// RELAXATION (BIDIRECTIONAL GAIN EXPLORATION)
+// ============================================================================
+// When noise is already excellent (below MOTOR_RMS_EXCELLENT), we can try
+// RAISING parameters to get better performance without noise penalty.
+
+// Check if we should attempt relaxation (raising parameters)
+static bool shouldAttemptRelaxation(float baselineRms)
+{
+    return baselineRms < MOTOR_RMS_EXCELLENT;
+}
+
+// Apply a relaxation test - temporarily raise a parameter
+static void applyRelaxationTest(hoverDiagPhase_e phase)
+{
+    switch (phase) {
+        case HOVER_DIAG_RELAX_ROLL:
+            // Raise roll gains by 50%
+            currentPidProfile->pid[FD_ROLL].P = (uint8_t)MIN(255, runtime.savedSettings.rollP * 1.5f);
+            currentPidProfile->pid[FD_ROLL].I = (uint8_t)MIN(255, runtime.savedSettings.rollI * 1.5f);
+            currentPidProfile->pid[FD_ROLL].D = (uint8_t)MIN(255, runtime.savedSettings.rollD * 1.5f);
+            currentPidProfile->pid[FD_ROLL].F = (uint16_t)MIN(2000, runtime.savedSettings.rollF * 1.5f);
+            pidInitConfig(currentPidProfile);
+            runtime.lastReasonCode = REASON_HOVER_RELAX_D_UP;  // Raising gains
+            break;
+            
+        case HOVER_DIAG_RELAX_PITCH:
+            // Raise pitch gains by 50%
+            currentPidProfile->pid[FD_PITCH].P = (uint8_t)MIN(255, runtime.savedSettings.pitchP * 1.5f);
+            currentPidProfile->pid[FD_PITCH].I = (uint8_t)MIN(255, runtime.savedSettings.pitchI * 1.5f);
+            currentPidProfile->pid[FD_PITCH].D = (uint8_t)MIN(255, runtime.savedSettings.pitchD * 1.5f);
+            currentPidProfile->pid[FD_PITCH].F = (uint16_t)MIN(2000, runtime.savedSettings.pitchF * 1.5f);
+            pidInitConfig(currentPidProfile);
+            runtime.lastReasonCode = REASON_HOVER_RELAX_D_UP;  // Raising gains
+            break;
+            
+        case HOVER_DIAG_RELAX_GYRO_LPF1:
+            // Raise gyro LPF1 by 50Hz
+            {
+                uint16_t newHz = runtime.savedSettings.gyroLpf1Hz + 50;
+                newHz = MIN(newHz, GYRO_LPF1_MAX_HZ);
+                if (runtime.savedSettings.gyroLpf1IsDynamic) {
+                    gyroConfigMutable()->gyro_lpf1_dyn_min_hz = newHz;
+                    gyro.dynLpfMin = newHz;
+                } else {
+                    gyroConfigMutable()->gyro_lpf1_static_hz = newHz;
+                    gyroInitFilters();
+                }
+                runtime.lastReasonCode = REASON_HOVER_RELAX_GYRO_LPF1;
+            }
+            break;
+            
+        case HOVER_DIAG_RELAX_DTERM_LPF1:
+            // Raise D-term LPF1 by 25Hz
+            {
+                uint16_t newHz = runtime.savedSettings.dtermLpf1Hz + 25;
+                newHz = MIN(newHz, DTERM_LPF1_MAX_HZ);
+                if (runtime.savedSettings.dtermLpf1IsDynamic) {
+                    currentPidProfile->dterm_lpf1_dyn_min_hz = newHz;
+                    pidRuntime.dynLpfMin = newHz;
+                } else {
+                    currentPidProfile->dterm_lpf1_static_hz = newHz;
+                    pidInitFilters(currentPidProfile);
+                }
+                runtime.lastReasonCode = REASON_HOVER_RELAX_DTERM_LPF1;
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
+// Evaluate relaxation result - keep changes if noise acceptable
+static bool evaluateRelaxationResult(float testRms, float maxAcceptable)
+{
+    return testRms < maxAcceptable;
+}
+
+// Apply permanent relaxation fix if the test showed acceptable noise
+static void applyRelaxationFix(hoverDiagPhase_e phase)
+{
+    switch (phase) {
+        case HOVER_DIAG_RELAX_ROLL:
+            // Make higher roll gains permanent by updating savedSettings
+            runtime.savedSettings.rollP = (uint8_t)MIN(255, runtime.savedSettings.rollP * 1.5f);
+            runtime.savedSettings.rollI = (uint8_t)MIN(255, runtime.savedSettings.rollI * 1.5f);
+            runtime.savedSettings.rollD = (uint8_t)MIN(255, runtime.savedSettings.rollD * 1.5f);
+            runtime.savedSettings.rollF = (uint16_t)MIN(2000, runtime.savedSettings.rollF * 1.5f);
+            break;
+            
+        case HOVER_DIAG_RELAX_PITCH:
+            // Make higher pitch gains permanent
+            runtime.savedSettings.pitchP = (uint8_t)MIN(255, runtime.savedSettings.pitchP * 1.5f);
+            runtime.savedSettings.pitchI = (uint8_t)MIN(255, runtime.savedSettings.pitchI * 1.5f);
+            runtime.savedSettings.pitchD = (uint8_t)MIN(255, runtime.savedSettings.pitchD * 1.5f);
+            runtime.savedSettings.pitchF = (uint16_t)MIN(2000, runtime.savedSettings.pitchF * 1.5f);
+            break;
+            
+        case HOVER_DIAG_RELAX_GYRO_LPF1:
+            // Make higher gyro LPF1 permanent
+            {
+                uint16_t newHz = runtime.savedSettings.gyroLpf1Hz + 50;
+                runtime.savedSettings.gyroLpf1Hz = MIN(newHz, GYRO_LPF1_MAX_HZ);
+            }
+            break;
+            
+        case HOVER_DIAG_RELAX_DTERM_LPF1:
+            // Make higher D-term LPF1 permanent
+            {
+                uint16_t newHz = runtime.savedSettings.dtermLpf1Hz + 25;
+                runtime.savedSettings.dtermLpf1Hz = MIN(newHz, DTERM_LPF1_MAX_HZ);
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
 // Record sensitivity measurements from all diagnostic tests
 // This populates Newton history for later use in PID tune mode
-static void recordDiagnosticSensitivities(void)
+// Returns the sensitivities in the provided array for multi-variable fix
+static void recordDiagnosticSensitivities(float sensitivities[4])
 {
     float baselineRms = runtime.diagRms[HOVER_DIAG_BASELINE];
     
@@ -896,6 +959,7 @@ static void recordDiagnosticSensitivities(void)
         
         newtonHistory_t *history = getParameterHistory(FD_ROLL, TUNE_PARAM_P);
         history->lastSensitivity = sensitivity;
+        sensitivities[0] = sensitivity;
         recordToHistory(FD_ROLL, TUNE_PARAM_P, baselineP, baselineRms);
     }
     
@@ -908,6 +972,7 @@ static void recordDiagnosticSensitivities(void)
         
         newtonHistory_t *history = getParameterHistory(FD_PITCH, TUNE_PARAM_P);
         history->lastSensitivity = sensitivity;
+        sensitivities[1] = sensitivity;
         recordToHistory(FD_PITCH, TUNE_PARAM_P, baselineP, baselineRms);
     }
     
@@ -920,6 +985,7 @@ static void recordDiagnosticSensitivities(void)
         
         newtonHistory_t *history = &runtime.newtonHistory.gyroLpf1;
         history->lastSensitivity = sensitivity;
+        sensitivities[2] = sensitivity;
         recordToHistory(-1, TUNE_PARAM_GYRO_LPF1, baselineHz, baselineRms);
     }
     
@@ -932,8 +998,155 @@ static void recordDiagnosticSensitivities(void)
         
         newtonHistory_t *history = &runtime.newtonHistory.dtermLpf1;
         history->lastSensitivity = sensitivity;
+        sensitivities[3] = sensitivity;
         recordToHistory(-1, TUNE_PARAM_DTERM_LPF1, baselineHz, baselineRms);
     }
+}
+
+// Multi-variable fix: Apply adjustments to ALL parameters simultaneously
+// based on their sensitivities, instead of one-at-a-time sequential approach.
+// This uses the formula: Δparam[i] = (baseline - target) × (sensitivity[i] / Σ|sensitivity|)
+// with 90% damping applied to each adjustment.
+// Returns a bitmask of which parameters were changed (for debug reason code).
+static uint8_t applyMultiVariableFix(float baselineRms, float targetRms, 
+                                      const float sensitivities[4])
+{
+    // Calculate the total error we need to correct
+    float error = baselineRms - targetRms;
+    if (error <= 0) {
+        return 0;  // Already at or below target
+    }
+    
+    // Calculate sum of absolute sensitivities for proportional distribution
+    // Each sensitivity tells us: delta_RMS / delta_param
+    // We want to distribute the needed improvement proportionally
+    float sumAbsSensitivity = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        sumAbsSensitivity += fabsf(sensitivities[i]);
+    }
+    
+    if (sumAbsSensitivity < NEWTON_MIN_DERIVATIVE) {
+        return 0;  // No meaningful sensitivities - can't compute adjustments
+    }
+    
+    uint8_t changedMask = 0;
+    
+    // Parameter 0: Roll P (and I, D, F proportionally)
+    {
+        float sensitivity = sensitivities[0];
+        if (fabsf(sensitivity) > NEWTON_MIN_DERIVATIVE) {
+            // Distribute error proportionally by sensitivity contribution
+            float contribution = fabsf(sensitivity) / sumAbsSensitivity;
+            float targetDeltaRms = error * contribution;
+            
+            // Calculate parameter change: Δparam = Δmetric / sensitivity
+            // Note: if sensitivity is negative, lowering param lowers RMS (good)
+            float deltaP = -targetDeltaRms / sensitivity;
+            
+            // Apply 90% damping
+            deltaP *= NEWTON_DAMPING_FACTOR;
+            
+            // Apply as scale factor to all Roll gains
+            float baselineP = runtime.savedSettings.rollP;
+            float newP = baselineP + deltaP;
+            float scale = newP / baselineP;
+            scale = constrainf(scale, 0.3f, 1.5f);  // Limit scale factor
+            
+            uint8_t finalP = (uint8_t)constrainf(runtime.savedSettings.rollP * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            
+            // Only apply if meaningful change
+            if (finalP != runtime.savedSettings.rollP) {
+                currentPidProfile->pid[FD_ROLL].P = finalP;
+                currentPidProfile->pid[FD_ROLL].I = (uint8_t)constrainf(runtime.savedSettings.rollI * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                currentPidProfile->pid[FD_ROLL].D = (uint8_t)constrainf(runtime.savedSettings.rollD * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                currentPidProfile->pid[FD_ROLL].F = (uint16_t)constrainf(runtime.savedSettings.rollF * scale, 0, 2000);
+                changedMask |= 0x01;
+            }
+        }
+    }
+    
+    // Parameter 1: Pitch P (and I, D, F proportionally)
+    {
+        float sensitivity = sensitivities[1];
+        if (fabsf(sensitivity) > NEWTON_MIN_DERIVATIVE) {
+            float contribution = fabsf(sensitivity) / sumAbsSensitivity;
+            float targetDeltaRms = error * contribution;
+            float deltaP = -targetDeltaRms / sensitivity;
+            deltaP *= NEWTON_DAMPING_FACTOR;
+            
+            float baselineP = runtime.savedSettings.pitchP;
+            float newP = baselineP + deltaP;
+            float scale = newP / baselineP;
+            scale = constrainf(scale, 0.3f, 1.5f);
+            
+            uint8_t finalP = (uint8_t)constrainf(runtime.savedSettings.pitchP * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+            
+            if (finalP != runtime.savedSettings.pitchP) {
+                currentPidProfile->pid[FD_PITCH].P = finalP;
+                currentPidProfile->pid[FD_PITCH].I = (uint8_t)constrainf(runtime.savedSettings.pitchI * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                currentPidProfile->pid[FD_PITCH].D = (uint8_t)constrainf(runtime.savedSettings.pitchD * scale, GAIN_MIN_VALUE, GAIN_MAX_VALUE);
+                currentPidProfile->pid[FD_PITCH].F = (uint16_t)constrainf(runtime.savedSettings.pitchF * scale, 0, 2000);
+                changedMask |= 0x02;
+            }
+        }
+    }
+    
+    // Parameter 2: Gyro LPF1 Hz
+    {
+        float sensitivity = sensitivities[2];
+        if (fabsf(sensitivity) > NEWTON_MIN_DERIVATIVE) {
+            float contribution = fabsf(sensitivity) / sumAbsSensitivity;
+            float targetDeltaRms = error * contribution;
+            float deltaHz = -targetDeltaRms / sensitivity;
+            deltaHz *= NEWTON_DAMPING_FACTOR;
+            
+            float baselineHz = runtime.savedSettings.gyroLpf1Hz;
+            uint16_t newHz = (uint16_t)constrainf(baselineHz + deltaHz, GYRO_LPF1_MIN_HZ, GYRO_LPF1_MAX_HZ);
+            
+            if (newHz != runtime.savedSettings.gyroLpf1Hz) {
+                if (runtime.savedSettings.gyroLpf1IsDynamic) {
+                    gyroConfigMutable()->gyro_lpf1_dyn_min_hz = newHz;
+                    gyro.dynLpfMin = newHz;
+                } else {
+                    gyroConfigMutable()->gyro_lpf1_static_hz = newHz;
+                    gyroInitFilters();
+                }
+                changedMask |= 0x04;
+            }
+        }
+    }
+    
+    // Parameter 3: D-term LPF1 Hz
+    {
+        float sensitivity = sensitivities[3];
+        if (fabsf(sensitivity) > NEWTON_MIN_DERIVATIVE) {
+            float contribution = fabsf(sensitivity) / sumAbsSensitivity;
+            float targetDeltaRms = error * contribution;
+            float deltaHz = -targetDeltaRms / sensitivity;
+            deltaHz *= NEWTON_DAMPING_FACTOR;
+            
+            float baselineHz = runtime.savedSettings.dtermLpf1Hz;
+            uint16_t newHz = (uint16_t)constrainf(baselineHz + deltaHz, DTERM_LPF1_MIN_HZ, DTERM_LPF1_MAX_HZ);
+            
+            if (newHz != runtime.savedSettings.dtermLpf1Hz) {
+                if (runtime.savedSettings.dtermLpf1IsDynamic) {
+                    currentPidProfile->dterm_lpf1_dyn_min_hz = newHz;
+                    pidRuntime.dynLpfMin = newHz;
+                } else {
+                    currentPidProfile->dterm_lpf1_static_hz = newHz;
+                    pidInitFilters(currentPidProfile);
+                }
+                changedMask |= 0x08;
+            }
+        }
+    }
+    
+    // Reinitialize PID if any gains changed
+    if (changedMask & 0x03) {
+        pidInitConfig(currentPidProfile);
+    }
+    
+    return changedMask;
 }
 
 // Apply permanent fix for the dominant contributor
@@ -1182,37 +1395,143 @@ static bool updateHoverDiagnostic(timeUs_t currentTimeUs)
             runtime.diagImprovement[HOVER_DIAG_DTERM_LPF1_TEST] = 
                 (safeBase - runtime.diagRms[HOVER_DIAG_DTERM_LPF1_TEST]) / safeBase * 100.0f;
             
-            // STEP 1: Record sensitivities for ALL tests (for later PID tune use)
-            // This populates Newton history even if we don't apply fixes
-            recordDiagnosticSensitivities();
+            // STEP 1: Record sensitivities for ALL tests
+            // This populates Newton history and returns sensitivities for multi-var fix
+            float sensitivities[4];
+            recordDiagnosticSensitivities(sensitivities);
             
-            // STEP 2: Find the SINGLE BEST improvement
-            float bestImprovement = 0.0f;
-            hoverDiagPhase_e bestPhase = HOVER_DIAG_IDLE;
+            // STEP 2: Check if noise is above target
+            if (baselineRms <= MOTOR_RMS_TARGET) {
+                // Target reached - check if we should try relaxation
+                if (shouldAttemptRelaxation(baselineRms)) {
+                    // Noise is excellent - try raising parameters for better performance
+                    // Save current settings as the new baseline for relaxation tests
+                    saveDiagnosticSettings();
+                    applyRelaxationTest(HOVER_DIAG_RELAX_ROLL);
+                    runtime.diagPhase = HOVER_DIAG_RELAX_ROLL;
+                    return false;  // Continue with relaxation tests
+                }
+                runtime.lastReasonCode = REASON_DIAG_TARGET_REACHED;
+                triggerWiggleSignal(currentTimeUs);
+                runtime.diagPhase = HOVER_DIAG_COMPLETE;
+                return true;
+            }
             
+            // STEP 3: Check if any test showed meaningful improvement
+            bool hasImprovement = false;
             for (int i = HOVER_DIAG_ROLL_TEST; i <= HOVER_DIAG_DTERM_LPF1_TEST; i++) {
-                if (runtime.diagImprovement[i] > bestImprovement) {
-                    bestImprovement = runtime.diagImprovement[i];
-                    bestPhase = (hoverDiagPhase_e)i;
+                if (runtime.diagImprovement[i] >= DIAG_IMPROVEMENT_THRESHOLD) {
+                    hasImprovement = true;
+                    break;
                 }
             }
             
-            // STEP 3: Apply ONLY the best fix if noise is above target
-            if (baselineRms > MOTOR_RMS_TARGET && bestImprovement >= DIAG_IMPROVEMENT_THRESHOLD) {
-                // Apply the single best fix to get into acceptable range
-                applyDiagnosticFix(bestPhase);
-            } else if (baselineRms <= MOTOR_RMS_TARGET) {
-                runtime.lastReasonCode = REASON_DIAG_TARGET_REACHED;
-            } else {
+            if (!hasImprovement) {
+                // No improvements found - diagnostic complete without fixes
                 runtime.lastReasonCode = REASON_DIAG_NO_IMPROVEMENT;
+                triggerWiggleSignal(currentTimeUs);
+                runtime.diagPhase = HOVER_DIAG_COMPLETE;
+                return true;
             }
             
-            // STEP 4: Hover diagnostic complete - trigger wiggle and exit
-            // We've recorded sensitivities and applied at most one fix
-            // Ready to start real PID tune
+            // STEP 4: Apply multi-variable fix using ALL sensitivities simultaneously
+            // This is more efficient than the old one-at-a-time sequential approach
+            uint8_t changedMask = applyMultiVariableFix(baselineRms, MOTOR_RMS_TARGET, sensitivities);
+            
+            if (changedMask == 0) {
+                // No parameters changed - may be at limits
+                runtime.lastReasonCode = REASON_DIAG_NO_IMPROVEMENT;
+                triggerWiggleSignal(currentTimeUs);
+                runtime.diagPhase = HOVER_DIAG_COMPLETE;
+                return true;
+            }
+            
+            // Set reason code based on which parameters changed
+            // Encode the bitmask into the reason code for debug visibility
+            // 1565 = multi-var base, add mask for detail: 1565-1579
+            runtime.lastReasonCode = REASON_DIAG_MULTI_VAR_FIX + (changedMask & 0x0F);
+            
+            // STEP 5: Restart diagnostic cycle to verify fixes
+            runtime.diagIteration++;
+            
+            if (runtime.diagIteration >= DIAG_MAX_ITERATIONS) {
+                runtime.lastReasonCode = REASON_DIAG_MAX_ITERATIONS;
+                triggerWiggleSignal(currentTimeUs);
+                runtime.diagPhase = HOVER_DIAG_COMPLETE;
+                return true;
+            }
+            
+            // Signal adjustment applied, then restart diagnostics
+            triggerWiggleSignal(currentTimeUs);
+            runtime.diagPhase = HOVER_DIAG_BASELINE;
+            
+            // Clear RMS array for next cycle
+            for (int i = 0; i < HOVER_DIAG_PHASE_COUNT; i++) {
+                runtime.diagRms[i] = 0.0f;
+                runtime.diagImprovement[i] = 0.0f;
+            }
+            
+            return false;  // Continue tuning with next cycle
+        }
+        
+        // ====================================================================
+        // RELAXATION PHASES - Try raising parameters when noise is excellent
+        // ====================================================================
+        
+        case HOVER_DIAG_RELAX_ROLL:
+        {
+            // Roll relaxation test complete - evaluate and move to pitch
+            if (evaluateRelaxationResult(currentRms, MOTOR_RMS_RELAXED_MAX)) {
+                // Keep the higher gains - update savedSettings
+                applyRelaxationFix(HOVER_DIAG_RELAX_ROLL);
+                runtime.lastReasonCode = REASON_HOVER_RELAX_D_UP;
+            }
+            // Restore to (possibly updated) savedSettings before next test
+            restoreDiagnosticSettings();
+            applyRelaxationTest(HOVER_DIAG_RELAX_PITCH);
+            runtime.diagPhase = HOVER_DIAG_RELAX_PITCH;
+            break;
+        }
+        
+        case HOVER_DIAG_RELAX_PITCH:
+        {
+            // Pitch relaxation test complete - evaluate and move to gyro LPF1
+            if (evaluateRelaxationResult(currentRms, MOTOR_RMS_RELAXED_MAX)) {
+                applyRelaxationFix(HOVER_DIAG_RELAX_PITCH);
+                runtime.lastReasonCode = REASON_HOVER_RELAX_D_UP;
+            }
+            restoreDiagnosticSettings();
+            applyRelaxationTest(HOVER_DIAG_RELAX_GYRO_LPF1);
+            runtime.diagPhase = HOVER_DIAG_RELAX_GYRO_LPF1;
+            break;
+        }
+        
+        case HOVER_DIAG_RELAX_GYRO_LPF1:
+        {
+            // Gyro LPF1 relaxation test complete - evaluate and move to D-term LPF1
+            if (evaluateRelaxationResult(currentRms, MOTOR_RMS_RELAXED_MAX)) {
+                applyRelaxationFix(HOVER_DIAG_RELAX_GYRO_LPF1);
+                runtime.lastReasonCode = REASON_HOVER_RELAX_GYRO_LPF1;
+            }
+            restoreDiagnosticSettings();
+            applyRelaxationTest(HOVER_DIAG_RELAX_DTERM_LPF1);
+            runtime.diagPhase = HOVER_DIAG_RELAX_DTERM_LPF1;
+            break;
+        }
+        
+        case HOVER_DIAG_RELAX_DTERM_LPF1:
+        {
+            // D-term LPF1 relaxation test complete - evaluate and finish
+            if (evaluateRelaxationResult(currentRms, MOTOR_RMS_RELAXED_MAX)) {
+                applyRelaxationFix(HOVER_DIAG_RELAX_DTERM_LPF1);
+                runtime.lastReasonCode = REASON_HOVER_RELAX_DTERM_LPF1;
+            }
+            // Restore final settings and complete
+            restoreDiagnosticSettings();
+            runtime.lastReasonCode = REASON_HOVER_RELAX_AT_MAX;
             triggerWiggleSignal(currentTimeUs);
             runtime.diagPhase = HOVER_DIAG_COMPLETE;
-            return true;  // Diagnostic phase done
+            return true;
         }
             
         case HOVER_DIAG_COMPLETE:
@@ -1377,23 +1696,58 @@ static bool isManeuverComplete(void)
     return (maxRate < 100.0f && maxStick < 0.2f);
 }
 
+// Track why hover isn't stable (for debug output)
+static struct {
+    float maxRate;       // Max gyro rate (deg/s)
+    float maxSetpoint;   // Max setpoint (deg/s) - represents pilot intent
+    float maxStick;      // Max stick deflection (0-1)
+    int8_t throttle;
+    uint8_t failReason;  // 0=stable, 1=setpoint, 2=gyro, 3=stick, 4=throttle_low, 5=throttle_high
+} hoverDiag;
+
 static bool isHoverStable(void)
 {
     // Check if in stable hover - used for initial hover calibration
-    const float maxRate = MAX(fabsf(gyro.gyroADCf[FD_ROLL]), 
-                              MAX(fabsf(gyro.gyroADCf[FD_PITCH]),
-                                  fabsf(gyro.gyroADCf[FD_YAW])));
-    const float maxStick = MAX(fabsf(getRcDeflection(FD_ROLL)),
-                               MAX(fabsf(getRcDeflection(FD_PITCH)),
-                                   fabsf(getRcDeflection(FD_YAW))));
-    const int8_t throttle = calculateThrottlePercent();
+    // 
+    // Key insight: SETPOINT is what matters, not raw gyro rate.
+    // - Setpoint = what the pilot is commanding (low = sticks centered)
+    // - Gyro rate = actual rotation (can be high due to wind/prop wash even in "stable" hover)
+    // 
+    // A quad hovering in place will have some gyro activity from natural wobble,
+    // but if setpoint is low, the pilot isn't trying to fly - that's "stable hover".
     
-    // Must have some throttle (not on ground) and low rates/sticks
-    bool isStable = (maxRate < HOVER_GYRO_THRESHOLD && 
-                     maxStick < HOVER_STICK_THRESHOLD &&
-                     throttle > 15 && throttle < 80);  // Reasonable hover range
+    hoverDiag.maxRate = MAX(fabsf(gyro.gyroADCf[FD_ROLL]), 
+                            MAX(fabsf(gyro.gyroADCf[FD_PITCH]),
+                                fabsf(gyro.gyroADCf[FD_YAW])));
     
-    return isStable;
+    // Get setpoint (commanded rate) = stick deflection * max rate
+    // This represents what the pilot is commanding, not natural hover wobble
+    hoverDiag.maxSetpoint = MAX(fabsf(getRcDeflection(FD_ROLL) * getMaxRcRate(FD_ROLL)),
+                                MAX(fabsf(getRcDeflection(FD_PITCH) * getMaxRcRate(FD_PITCH)),
+                                    fabsf(getRcDeflection(FD_YAW) * getMaxRcRate(FD_YAW))));
+    
+    hoverDiag.maxStick = MAX(fabsf(getRcDeflection(FD_ROLL)),
+                             MAX(fabsf(getRcDeflection(FD_PITCH)),
+                                 fabsf(getRcDeflection(FD_YAW))));
+    hoverDiag.throttle = calculateThrottlePercent();
+    
+    // Check each condition and track what's failing
+    // Priority order: setpoint (most important) -> gyro (sanity) -> stick -> throttle
+    hoverDiag.failReason = 0;  // Assume stable
+    
+    if (hoverDiag.maxSetpoint >= HOVER_SETPOINT_THRESHOLD) {
+        hoverDiag.failReason = 1;  // Setpoint too high (pilot commanding movement)
+    } else if (hoverDiag.maxRate >= HOVER_GYRO_THRESHOLD) {
+        hoverDiag.failReason = 2;  // Gyro rate extreme (quad spinning out)
+    } else if (hoverDiag.maxStick >= HOVER_STICK_THRESHOLD) {
+        hoverDiag.failReason = 3;  // Stick deflection too high
+    } else if (hoverDiag.throttle <= 15) {
+        hoverDiag.failReason = 4;  // Throttle too low (on ground?)
+    } else if (hoverDiag.throttle >= 80) {
+        hoverDiag.failReason = 5;  // Throttle too high (climbing hard)
+    }
+    
+    return (hoverDiag.failReason == 0);
 }
 
 static bool calibrateHover(timeUs_t currentTimeUs)
@@ -1620,28 +1974,39 @@ static void updateDebugOutput(void)
         // [6] = noise floor from filter analysis * 10
         DEBUG_SET(DEBUG_AUTOTUNE, 6, (int16_t)(runtime.filterAnalysis.noiseFloor * 10));
     } else {
-        // [2] = P gain (or hover throttle before calibrated)
+        // [2] = P gain (or hover diagnostics before calibrated)
         if (!runtime.hoverCalibrated) {
-            DEBUG_SET(DEBUG_AUTOTUNE, 2, calculateThrottlePercent());  // Show current throttle
+            // Show hover detection diagnostics:
+            // [2] = current throttle %
+            // [3] = max setpoint (commanded rate) deg/s (threshold is 25)
+            // [4] = max gyro rate deg/s (threshold is 150, just sanity check)
+            // [5] = fail reason: 0=stable, 1=setpoint, 2=gyro, 3=stick, 4=thr_low, 5=thr_high
+            // [6] = max stick * 100 (threshold is 15)
+            DEBUG_SET(DEBUG_AUTOTUNE, 2, hoverDiag.throttle);
+            DEBUG_SET(DEBUG_AUTOTUNE, 3, (int16_t)(hoverDiag.maxSetpoint));  // deg/s
+            DEBUG_SET(DEBUG_AUTOTUNE, 4, (int16_t)(hoverDiag.maxRate));      // deg/s
+            DEBUG_SET(DEBUG_AUTOTUNE, 5, hoverDiag.failReason);
+            DEBUG_SET(DEBUG_AUTOTUNE, 6, (int16_t)(hoverDiag.maxStick * 100));
         } else {
+            // Hover calibrated - show gains
             DEBUG_SET(DEBUG_AUTOTUNE, 2, runtime.currentP);
+            
+            // [3] = D gain (or hover reference in ARMED state)
+            if (runtime.state == AUTOTUNE_STATE_ARMED) {
+                DEBUG_SET(DEBUG_AUTOTUNE, 3, runtime.hoverThrottle);  // Show calibrated hover
+            } else {
+                DEBUG_SET(DEBUG_AUTOTUNE, 3, runtime.currentD);
+            }
+            
+            // [4] = I gain
+            DEBUG_SET(DEBUG_AUTOTUNE, 4, runtime.currentI);
+            
+            // [5] = F gain
+            DEBUG_SET(DEBUG_AUTOTUNE, 5, runtime.currentF);
+            
+            // [6] = overshoot * 10
+            DEBUG_SET(DEBUG_AUTOTUNE, 6, (int16_t)(runtime.metrics.overshootPercent * 10));
         }
-        
-        // [3] = D gain (or hover reference after calibrated)
-        if (runtime.hoverCalibrated && runtime.state == AUTOTUNE_STATE_ARMED) {
-            DEBUG_SET(DEBUG_AUTOTUNE, 3, runtime.hoverThrottle);  // Show calibrated hover
-        } else {
-            DEBUG_SET(DEBUG_AUTOTUNE, 3, runtime.currentD);
-        }
-        
-        // [4] = I gain
-        DEBUG_SET(DEBUG_AUTOTUNE, 4, runtime.currentI);
-        
-        // [5] = F gain
-        DEBUG_SET(DEBUG_AUTOTUNE, 5, runtime.currentF);
-        
-        // [6] = overshoot * 10
-        DEBUG_SET(DEBUG_AUTOTUNE, 6, (int16_t)(runtime.metrics.overshootPercent * 10));
     }
     
     // [7] = ALWAYS reason code (explains what autotune is doing)
@@ -1787,6 +2152,20 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                 // While hovering (sticks centered, stable throttle), run A/B tests to identify noise source
                 if (runtime.hoverTuneActive && isHoverStable()) {
                     runtime.status = STATUS_COLLECTING_DATA;  // Show we're doing something
+                    
+                    // Check if sequential adjustment is in progress (from queued fixes)
+                    if (runtime.adjState != ADJ_STATE_IDLE) {
+                        // Apply queued adjustments one by one with verification
+                        if (updateSequentialAdjustment(currentTimeUs)) {
+                            // All adjustments complete - wiggle and exit hover tune
+                            runtime.hoverTuneActive = false;
+                            hoverCalibratedWiggleStart = currentTimeUs;
+                            hoverWiggleActive = true;
+                        }
+                        // Don't detect maneuvers while applying adjustments
+                        break;
+                    }
+                    
                     if (updateHoverDiagnostic(currentTimeUs)) {
                         // Diagnostic tuning complete - wiggle to signal ready for maneuvers
                         runtime.hoverTuneActive = false;
@@ -1825,6 +2204,10 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                 // Detect maneuver start
                 autotuneTuneMode_e detected = detectManeuverType();
                 if (detected != TUNE_MODE_NONE) {
+                    // Reset Newton history when mode changes to prevent stale data
+                    if (detected != runtime.tuneMode) {
+                        resetNewtonHistory();
+                    }
                     runtime.tuneMode = detected;
                     runtime.currentAxis = (detected == TUNE_MODE_ROLL) ? FD_ROLL : 
                                           (detected == TUNE_MODE_PITCH) ? FD_PITCH : FD_ROLL;
@@ -2093,6 +2476,36 @@ void autotuneUpdate(timeUs_t currentTimeUs)
                             &runtime.lastReasonCode
                         );
                         runtime.iteration++;
+                        
+                        // Record gains to Newton history based on which parameter was adjusted
+                        // P gain with overshoot metric
+                        if (runtime.attribution.primary == GAIN_ATTRIBUTION_P || 
+                            runtime.attribution.secondary == GAIN_ATTRIBUTION_P) {
+                            recordToHistory(runtime.currentAxis, TUNE_PARAM_P,
+                                (float)currentPidProfile->pid[runtime.currentAxis].P,
+                                runtime.metrics.overshootPercent);
+                        }
+                        // D gain with noise metric
+                        if (runtime.attribution.primary == GAIN_ATTRIBUTION_D || 
+                            runtime.attribution.secondary == GAIN_ATTRIBUTION_D) {
+                            recordToHistory(runtime.currentAxis, TUNE_PARAM_D,
+                                (float)currentPidProfile->pid[runtime.currentAxis].D,
+                                runtime.metrics.noiseRms);
+                        }
+                        // F gain with velocity-weighted lag metric
+                        if (runtime.attribution.primary == GAIN_ATTRIBUTION_F || 
+                            runtime.attribution.secondary == GAIN_ATTRIBUTION_F) {
+                            recordToHistory(runtime.currentAxis, TUNE_PARAM_F,
+                                (float)currentPidProfile->pid[runtime.currentAxis].F,
+                                runtime.metrics.velocityWeightedLag);
+                        }
+                        // I gain with steady state error metric
+                        if (runtime.attribution.primary == GAIN_ATTRIBUTION_I || 
+                            runtime.attribution.secondary == GAIN_ATTRIBUTION_I) {
+                            recordToHistory(runtime.currentAxis, TUNE_PARAM_I,
+                                (float)currentPidProfile->pid[runtime.currentAxis].I,
+                                runtime.metrics.steadyStateError);
+                        }
                         
                         // Check if this axis hit limit or achieved excellent response
                         if (runtime.lastReasonCode == REASON_AT_LIMIT ||

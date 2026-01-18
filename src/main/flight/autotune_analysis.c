@@ -31,6 +31,48 @@
 #define RESONANCE_MAX_FREQ_HZ      500.0f   // Above this is usually handled by LPF anyway
 
 // ============================================================================
+// DAMPING RATIO CALCULATION
+// ============================================================================
+
+// Calculate damping ratio from overshoot percentage
+// Uses standard control theory formula: ζ = -ln(OS/100) / sqrt(π² + ln²(OS/100))
+// Returns value > 1.0 for overdamped (no overshoot)
+static float calculateDampingFromOvershoot(float overshootPercent, float riseTimeMs)
+{
+    if (overshootPercent <= 0.0f) {
+        // No overshoot = overdamped
+        // Estimate how overdamped based on rise time
+        // A well-tuned quad should have rise time < 40ms
+        // Rise time > 60ms is sluggish (overdamped)
+        // Map rise time to damping ratio > 1.0
+        if (riseTimeMs > 100.0f) {
+            return 2.0f;  // Very overdamped
+        } else if (riseTimeMs > 60.0f) {
+            return 1.5f;  // Moderately overdamped
+        } else if (riseTimeMs > 40.0f) {
+            return 1.2f;  // Slightly overdamped  
+        }
+        return 1.0f;  // Critically damped (good rise time, no overshoot)
+    }
+    
+    // Clamp to reasonable range to avoid math issues
+    if (overshootPercent > 100.0f) {
+        overshootPercent = 100.0f;
+    }
+    
+    float os = overshootPercent / 100.0f;
+    float lnOs = logf(os);
+    
+    // ζ = -ln(OS) / sqrt(π² + ln²(OS))
+    float denominator = sqrtf(M_PIf * M_PIf + lnOs * lnOs);
+    if (denominator < 0.001f) {
+        return 1.0f;
+    }
+    
+    return -lnOs / denominator;
+}
+
+// ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
 
@@ -204,11 +246,42 @@ void autotuneAnalyzeResponse(
         }
     }
     
-    // Overshoot = (peak - setpoint) / setpoint * 100
+    // Traditional overshoot = (peak - setpoint) / setpoint * 100
+    // This looks at peak gyro shortly after reaching target
+    float traditionalOvershoot = 0.0f;
     if (fabsf(peakSetpoint) > 1.0f) {
-        float overshoot = (fabsf(peakResponse) - fabsf(peakSetpoint)) / fabsf(peakSetpoint) * 100.0f;
-        metricsOut->overshootPercent = MAX(0.0f, overshoot);
+        traditionalOvershoot = (fabsf(peakResponse) - fabsf(peakSetpoint)) / fabsf(peakSetpoint) * 100.0f;
+        traditionalOvershoot = MAX(0.0f, traditionalOvershoot);
     }
+    
+    // Also calculate INSTANTANEOUS overshoot - max(|gyro| - |setpoint|) at any point
+    // This catches oscillation around setpoint during sustained maneuvers
+    float maxInstantOvershoot = 0.0f;
+    for (uint16_t i = maneuverStart; i < sampleCount; i++) {
+        // Only count when setpoint is significant (actual maneuver, not settling)
+        if (fabsf(setpointSamples[i]) > 50.0f) {
+            // Signed comparison: is gyro exceeding setpoint in the same direction?
+            float instantOvershoot;
+            if (setpointSamples[i] > 0) {
+                instantOvershoot = gyroSamples[i] - setpointSamples[i];  // Positive overshoot
+            } else {
+                instantOvershoot = setpointSamples[i] - gyroSamples[i];  // Negative setpoint, check the other way
+            }
+            
+            if (instantOvershoot > 0) {
+                float overshootPercent = instantOvershoot / fabsf(setpointSamples[i]) * 100.0f;
+                maxInstantOvershoot = MAX(maxInstantOvershoot, overshootPercent);
+            }
+        }
+    }
+    
+    // Use the LARGER of traditional or instantaneous overshoot
+    // This ensures we catch underdamped behavior whether it's at onset or during tracking
+    metricsOut->overshootPercent = MAX(traditionalOvershoot, maxInstantOvershoot);
+    
+    // Calculate damping ratio from overshoot AND rise time
+    // Rise time is critical for detecting overdamped responses (no overshoot but slow)
+    metricsOut->dampingRatio = calculateDampingFromOvershoot(metricsOut->overshootPercent, metricsOut->riseTimeMs);
     
     // Calculate tracking error (after settling region)
     uint16_t settleStart = MIN(peakResponseIdx + 20, sampleCount);
@@ -236,17 +309,40 @@ void autotuneAnalyzeResponse(
         }
     }
     
-    // Calculate oscillation amplitude (peak-to-peak after peak response)
+    // Calculate oscillation amplitude (peak-to-peak of TRACKING ERROR, not raw gyro)
+    // This is the true measure of underdamped behavior - gyro oscillating around setpoint
     if (peakResponseIdx + 10 < sampleCount) {
-        float minVal = gyroSamples[peakResponseIdx];
-        float maxVal = gyroSamples[peakResponseIdx];
+        float minError = 0;
+        float maxError = 0;
+        uint16_t signChanges = 0;
+        float prevError = 0;
         
         for (uint16_t i = peakResponseIdx; i < sampleCount; i++) {
-            minVal = MIN(minVal, gyroSamples[i]);
-            maxVal = MAX(maxVal, gyroSamples[i]);
+            float error = gyroSamples[i] - setpointSamples[i];
+            minError = MIN(minError, error);
+            maxError = MAX(maxError, error);
+            
+            // Count sign changes in error (oscillation frequency indicator)
+            if (i > peakResponseIdx && error * prevError < 0) {
+                signChanges++;
+            }
+            prevError = error;
         }
         
-        metricsOut->oscillationAmplitude = maxVal - minVal;
+        // Oscillation = peak-to-peak error around setpoint
+        metricsOut->oscillationAmplitude = maxError - minError;
+        
+        // High sign changes = high frequency oscillation (underdamped)
+        // Scale by window length to get changes per 100 samples
+        uint16_t windowLen = sampleCount - peakResponseIdx;
+        float signChangeRate = (float)signChanges / (float)windowLen * 100.0f;
+        
+        // If many sign changes AND significant amplitude, definitely underdamped
+        // Add sign change rate to amplitude to boost detection
+        if (signChangeRate > 10.0f) {  // More than 10 sign changes per 100 samples
+            metricsOut->oscillationAmplitude = MAX(metricsOut->oscillationAmplitude, 
+                                                    signChangeRate * 3.0f);  // Scale up
+        }
     }
     
     // Calculate oscillation frequency from settling region
@@ -420,43 +516,46 @@ autotuneResponseClass_e autotuneClassifyResponse(const autotuneMetrics_t *metric
         return RESPONSE_UNKNOWN;
     }
     
-    // Check for noise limit first
+    // Check for noise limit first - noise always takes priority
     if (metrics->noiseRms > NOISE_TARGET_RMS * 1.5f) {
         return RESPONSE_NOISY;
     }
     
-    // Check overshoot
-    if (metrics->overshootPercent > OVERSHOOT_TARGET_MAX * 1.5f) {
-        return RESPONSE_UNDERDAMPED;
-    }
-    
-    if (metrics->overshootPercent < OVERSHOOT_TARGET_MIN) {
-        // Low overshoot - check if it's truly overdamped or excellent
-        if (metrics->riseTimeMs > 50.0f) {
-            return RESPONSE_OVERDAMPED;
-        }
-    }
-    
-    // Check for oscillations
+    // Check for oscillations - indicates instability regardless of damping
     if (metrics->oscillationAmplitude > OSCILLATION_THRESHOLD) {
         return RESPONSE_UNDERDAMPED;
     }
     
-    // Check if in target range
-    if (metrics->overshootPercent >= OVERSHOOT_TARGET_MIN && 
-        metrics->overshootPercent <= OVERSHOOT_TARGET_MAX &&
-        metrics->riseTimeMs < 40.0f &&
-        metrics->noiseRms < NOISE_TARGET_RMS) {
-        return RESPONSE_EXCELLENT;
-    }
+    // Classification based on damping ratio (more accurate than overshoot alone)
+    // Damping ratio ζ thresholds:
+    //   ζ < 0.5:  Underdamped - bouncy, oscillatory
+    //   ζ 0.5-0.7: Critical - snappy, slight overshoot OK for FPV
+    //   ζ 0.7-1.0: Excellent - optimal damping, minimal overshoot
+    //   ζ > 1.0:  Overdamped - sluggish, slow response
     
-    // Good but not perfect
-    if (metrics->overshootPercent >= OVERSHOOT_TARGET_MIN * 0.5f &&
-        metrics->overshootPercent <= OVERSHOOT_TARGET_MAX * 1.2f) {
-        return RESPONSE_CRITICAL;
+    if (metrics->dampingRatio < 0.5f) {
+        return RESPONSE_UNDERDAMPED;  // Bouncy, oscillatory
+    } else if (metrics->dampingRatio < 0.7f) {
+        // Snappy response with acceptable overshoot - good for FPV
+        // But also check rise time to ensure responsiveness
+        if (metrics->riseTimeMs < 50.0f && metrics->noiseRms < NOISE_TARGET_RMS) {
+            return RESPONSE_CRITICAL;
+        }
+        return RESPONSE_UNDERDAMPED;  // Rise time too slow despite damping
+    } else if (metrics->dampingRatio <= 1.0f) {
+        // Optimal damping range - check other quality factors
+        if (metrics->riseTimeMs < 40.0f && metrics->noiseRms < NOISE_TARGET_RMS) {
+            return RESPONSE_EXCELLENT;
+        }
+        // Good damping but other issues
+        if (metrics->riseTimeMs > 50.0f) {
+            return RESPONSE_OVERDAMPED;  // Rise time suggests sluggish
+        }
+        return RESPONSE_CRITICAL;  // Acceptable
+    } else {
+        // ζ > 1.0: Overdamped - sluggish response
+        return RESPONSE_OVERDAMPED;
     }
-    
-    return RESPONSE_UNKNOWN;
 }
 
 // ============================================================================
@@ -514,10 +613,88 @@ void autotuneAttributeGains(
     }
     
     // =========================================================================
-    // PHASE 2: Check for clear F-term issues
+    // PHASE 2: P/D attribution based on response class (CHECK FIRST!)
     // =========================================================================
+    // P/D response must be acceptable BEFORE optimizing F-term tracking.
+    // Otherwise F gets adjusted constantly while P/D are starved.
     
-    // NEW: Velocity-weighted lag detection
+    switch (responseClass) {
+        case RESPONSE_UNDERDAMPED:
+            // Too much overshoot / oscillation - P/D issue, handle and return
+            if (metrics->oscillationAmplitude > OSCILLATION_THRESHOLD) {
+                // High frequency oscillation = D too low (can't damp it)
+                if (metrics->oscillationFreqHz > 15.0f) {
+                    attributionOut->primary = GAIN_ATTRIBUTION_D;
+                    attributionOut->dDirection = ADJUST_INCREASE;
+                    attributionOut->confidence = 0.8f;
+                } else {
+                    // Lower frequency oscillation could be P too high
+                    attributionOut->primary = GAIN_ATTRIBUTION_P;
+                    attributionOut->pDirection = ADJUST_DECREASE;
+                    attributionOut->secondary = GAIN_ATTRIBUTION_D;
+                    attributionOut->dDirection = ADJUST_INCREASE;
+                    attributionOut->confidence = 0.6f;
+                }
+            } else {
+                // Just overshoot without oscillation = P too high
+                attributionOut->primary = GAIN_ATTRIBUTION_P;
+                attributionOut->pDirection = ADJUST_DECREASE;
+                attributionOut->confidence = 0.7f;
+            }
+            return;  // P/D needs work - don't fall through to F-term checks
+            
+        case RESPONSE_OVERDAMPED:
+            // Too slow / sluggish - P/D issue, handle and return
+            if (metrics->riseTimeMs > 60.0f) {
+                // Very slow = P is definitely too low
+                attributionOut->primary = GAIN_ATTRIBUTION_P;
+                attributionOut->pDirection = ADJUST_INCREASE;
+                attributionOut->confidence = 0.8f;
+            } else if (metrics->initialResponseDelay > 10.0f) {
+                // Slow initial response - P needs attention first
+                attributionOut->primary = GAIN_ATTRIBUTION_P;
+                attributionOut->pDirection = ADJUST_INCREASE;
+                attributionOut->secondary = GAIN_ATTRIBUTION_F;
+                attributionOut->fDirection = ADJUST_INCREASE;
+                attributionOut->confidence = 0.6f;
+            } else {
+                // Moderately slow = could be D too high (over-damping)
+                attributionOut->primary = GAIN_ATTRIBUTION_D;
+                attributionOut->dDirection = ADJUST_DECREASE;
+                attributionOut->secondary = GAIN_ATTRIBUTION_P;
+                attributionOut->pDirection = ADJUST_INCREASE;
+                attributionOut->confidence = 0.6f;
+            }
+            return;  // P/D needs work - don't fall through to F-term checks
+            
+        case RESPONSE_NOISY:
+            // Noise limiting - D/filter issue
+            attributionOut->primary = GAIN_ATTRIBUTION_D;
+            attributionOut->dDirection = ADJUST_DECREASE;
+            attributionOut->secondary = GAIN_ATTRIBUTION_FILTER;
+            attributionOut->confidence = 0.7f;
+            return;  // Handle noise before F-term optimization
+            
+        case RESPONSE_CRITICAL:
+        case RESPONSE_EXCELLENT:
+            // Good P/D response - fall through to check F-term tracking
+            break;
+            
+        default:
+            // Unknown response - try conservative P increase and return
+            attributionOut->primary = GAIN_ATTRIBUTION_P;
+            attributionOut->pDirection = ADJUST_INCREASE;
+            attributionOut->confidence = 0.3f;
+            return;
+    }
+    
+    // =========================================================================
+    // PHASE 3: F-term optimization (ONLY when P/D response is already good)
+    // =========================================================================
+    // If we get here, responseClass is EXCELLENT or CRITICAL, meaning P/D are acceptable.
+    // Now we can safely optimize feedforward tracking without starving P/D.
+    
+    // Velocity-weighted lag detection
     // If sticks were moving fast (high velocity) and there's ANY measurable lag, F needs adjustment
     // This catches the "last 50% of onset" scenario where small lags matter during fast moves
     bool highVelocityManeuver = (metrics->peakStickVelocity > 15.0f);  // Fast stick movement
@@ -544,7 +721,7 @@ void autotuneAttributeGains(
         }
     }
     
-    // Original checks (still useful for moderate-speed maneuvers)
+    // Checks for moderate-speed maneuvers
     // Significant stick lead error = F too low (gyro lagging stick input)
     if (metrics->stickLeadError > 30.0f && metrics->riseTimeMs < 40.0f) {
         // Good P/D (fast rise), but gyro lags stick = needs more feedforward
@@ -571,93 +748,25 @@ void autotuneAttributeGains(
     }
     
     // =========================================================================
-    // PHASE 3: P/D attribution based on response class
+    // PHASE 4: Fine-tuning for EXCELLENT/CRITICAL response
     // =========================================================================
+    // Response is good, F-term is good - look for minor improvements
     
-    switch (responseClass) {
-        case RESPONSE_UNDERDAMPED:
-            // Too much overshoot / oscillation
-            if (metrics->oscillationAmplitude > OSCILLATION_THRESHOLD) {
-                // High frequency oscillation = D too low (can't damp it)
-                if (metrics->oscillationFreqHz > 15.0f) {
-                    attributionOut->primary = GAIN_ATTRIBUTION_D;
-                    attributionOut->dDirection = ADJUST_INCREASE;
-                    attributionOut->confidence = 0.8f;
-                } else {
-                    // Lower frequency oscillation could be P too high
-                    attributionOut->primary = GAIN_ATTRIBUTION_P;
-                    attributionOut->pDirection = ADJUST_DECREASE;
-                    attributionOut->secondary = GAIN_ATTRIBUTION_D;
-                    attributionOut->dDirection = ADJUST_INCREASE;
-                    attributionOut->confidence = 0.6f;
-                }
-            } else {
-                // Just overshoot without oscillation = P too high
-                attributionOut->primary = GAIN_ATTRIBUTION_P;
-                attributionOut->pDirection = ADJUST_DECREASE;
-                attributionOut->confidence = 0.7f;
-            }
-            break;
-            
-        case RESPONSE_OVERDAMPED:
-            // Too slow / sluggish
-            if (metrics->riseTimeMs > 60.0f) {
-                // Very slow = P is definitely too low
-                attributionOut->primary = GAIN_ATTRIBUTION_P;
-                attributionOut->pDirection = ADJUST_INCREASE;
-                attributionOut->confidence = 0.8f;
-            } else if (metrics->initialResponseDelay > 10.0f) {
-                // Slow initial response could be F issue
-                attributionOut->primary = GAIN_ATTRIBUTION_F;
-                attributionOut->fDirection = ADJUST_INCREASE;
-                attributionOut->secondary = GAIN_ATTRIBUTION_P;
-                attributionOut->pDirection = ADJUST_INCREASE;
-                attributionOut->confidence = 0.5f;
-            } else {
-                // Moderately slow = could be D too high (over-damping)
-                attributionOut->primary = GAIN_ATTRIBUTION_D;
-                attributionOut->dDirection = ADJUST_DECREASE;
-                attributionOut->secondary = GAIN_ATTRIBUTION_P;
-                attributionOut->pDirection = ADJUST_INCREASE;
-                attributionOut->confidence = 0.6f;
-            }
-            break;
-            
-        case RESPONSE_NOISY:
-            // Noise limiting
-            attributionOut->primary = GAIN_ATTRIBUTION_D;
-            attributionOut->dDirection = ADJUST_DECREASE;
-            attributionOut->secondary = GAIN_ATTRIBUTION_FILTER;
-            attributionOut->confidence = 0.7f;
-            break;
-            
-        case RESPONSE_CRITICAL:
-        case RESPONSE_EXCELLENT:
-            // Good P/D response - look for I/F improvements
-            if (metrics->steadyStateError > 5.0f) {
-                // Could use a bit more I
-                attributionOut->primary = GAIN_ATTRIBUTION_I;
-                attributionOut->iDirection = ADJUST_INCREASE;
-                attributionOut->confidence = 0.4f;
-            } else if (metrics->stickLeadError > 15.0f) {
-                // Could use a bit more F
-                attributionOut->primary = GAIN_ATTRIBUTION_F;
-                attributionOut->fDirection = ADJUST_INCREASE;
-                attributionOut->confidence = 0.4f;
-            } else {
-                // Try pushing P slightly for more responsiveness
-                attributionOut->primary = GAIN_ATTRIBUTION_P;
-                attributionOut->pDirection = ADJUST_INCREASE;
-                attributionOut->confidence = 0.3f;  // Very conservative
-            }
-            break;
-            
-        default:
-            // Unknown - conservative P increase
-            attributionOut->primary = GAIN_ATTRIBUTION_P;
-            attributionOut->pDirection = ADJUST_INCREASE;
-            attributionOut->confidence = 0.3f;
-            break;
+    if (metrics->steadyStateError > 5.0f) {
+        // Could use a bit more I
+        attributionOut->primary = GAIN_ATTRIBUTION_I;
+        attributionOut->iDirection = ADJUST_INCREASE;
+        attributionOut->confidence = 0.4f;
+    } else if (metrics->stickLeadError > 15.0f) {
+        // Could use a bit more F (lower threshold since we already checked above)
+        attributionOut->primary = GAIN_ATTRIBUTION_F;
+        attributionOut->fDirection = ADJUST_INCREASE;
+        attributionOut->confidence = 0.4f;
+    } else {
+        // Try pushing P slightly for more responsiveness
+        attributionOut->primary = GAIN_ATTRIBUTION_P;
+        attributionOut->pDirection = ADJUST_INCREASE;
+        attributionOut->confidence = 0.3f;  // Very conservative
     }
     
     // =========================================================================
@@ -674,6 +783,47 @@ void autotuneAttributeGains(
         else if (metrics->trackingError > 20.0f && metrics->riseTimeMs < 35.0f) {
             attributionOut->secondary = GAIN_ATTRIBUTION_F;
             attributionOut->fDirection = ADJUST_INCREASE;
+        }
+    }
+    
+    // =========================================================================
+    // PHASE 5: Set directions for ALL gains (for tertiary adjustments)
+    // Only set if not already set by primary/secondary logic above
+    // =========================================================================
+    
+    // P direction based on rise time and overshoot
+    if (attributionOut->pDirection == ADJUST_NONE) {
+        if (metrics->riseTimeMs > 40.0f && metrics->overshootPercent < 25.0f) {
+            attributionOut->pDirection = ADJUST_INCREASE;  // Too slow, needs more P
+        } else if (metrics->overshootPercent > 25.0f || metrics->oscillationAmplitude > OSCILLATION_THRESHOLD * 0.7f) {
+            attributionOut->pDirection = ADJUST_DECREASE;  // Too aggressive
+        }
+    }
+    
+    // D direction based on oscillation and overshoot
+    if (attributionOut->dDirection == ADJUST_NONE) {
+        if (metrics->oscillationAmplitude > OSCILLATION_THRESHOLD * 0.5f || metrics->overshootPercent > 22.0f) {
+            attributionOut->dDirection = ADJUST_INCREASE;  // Needs more damping
+        } else if (metrics->riseTimeMs > 50.0f && metrics->overshootPercent < 8.0f) {
+            attributionOut->dDirection = ADJUST_DECREASE;  // Over-damped
+        }
+    }
+    
+    // F direction based on stick tracking lag
+    if (attributionOut->fDirection == ADJUST_NONE) {
+        if (metrics->velocityWeightedLag > 8.0f || metrics->stickLeadError > 20.0f) {
+            attributionOut->fDirection = ADJUST_INCREASE;  // Lagging stick
+        } else if (metrics->velocityWeightedLag < -5.0f || metrics->stickTrackingPhase < -5.0f) {
+            attributionOut->fDirection = ADJUST_DECREASE;  // Leading stick
+        }
+    }
+    
+    // I direction based on drift and steady-state error
+    if (attributionOut->iDirection == ADJUST_NONE) {
+        if (metrics->steadyStateError > 8.0f || metrics->driftRate > 15.0f) {
+            attributionOut->iDirection = ADJUST_INCREASE;  // Not holding position
+        } else if (metrics->bouncebackPercent > 20.0f) {
+            attributionOut->iDirection = ADJUST_DECREASE;  // Windup
         }
     }
 }
@@ -873,6 +1023,354 @@ void autotuneAnalyzeNoise(
 bool autotuneIsNoiseAcceptable(float noiseRms, float targetNoise)
 {
     return noiseRms <= targetNoise;
+}
+
+// ============================================================================
+// TERM-SPECIFIC METRIC MEASUREMENT FUNCTIONS
+// ============================================================================
+
+// Get the appropriate metric type for a tunable parameter
+tuneMetric_e getMetricForParameter(tuneParameter_e param)
+{
+    switch (param) {
+        case TUNE_PARAM_P:
+            return METRIC_SETPOINT_TRACKING;
+        case TUNE_PARAM_I:
+            return METRIC_LONG_TERM_ERROR;
+        case TUNE_PARAM_D:
+            return METRIC_OSCILLATION;
+        case TUNE_PARAM_F:
+            return METRIC_STICK_TRACKING;
+        case TUNE_PARAM_DTERM_LPF1:
+        case TUNE_PARAM_DTERM_LPF2:
+        case TUNE_PARAM_GYRO_LPF1:
+        case TUNE_PARAM_GYRO_LPF2:
+            return METRIC_MOTOR_RMS;
+        default:
+            return METRIC_MOTOR_RMS;
+    }
+}
+
+// Get target value for a specific metric type
+float getTargetForMetric(tuneMetric_e metric)
+{
+    switch (metric) {
+        case METRIC_MOTOR_RMS:
+            return TARGET_MOTOR_RMS;           // 15.0
+        case METRIC_OSCILLATION:
+            return TARGET_OSCILLATION;         // 5.0
+        case METRIC_SETPOINT_TRACKING:
+            return TARGET_SETPOINT_TRACKING;   // 0.95 (95%)
+        case METRIC_STICK_TRACKING:
+            return TARGET_STICK_TRACKING;      // 0.90 (90%)
+        case METRIC_LONG_TERM_ERROR:
+            return TARGET_LONG_TERM_ERROR;     // 2.0
+        case METRIC_OVERSHOOT:
+            return TARGET_OVERSHOOT;           // 10.0
+        case METRIC_SETTLING_TIME:
+            return TARGET_SETTLING_TIME;       // 150.0
+        default:
+            return TARGET_MOTOR_RMS;
+    }
+}
+
+// Measure oscillation amplitude for D-term optimization
+// Returns peak-to-peak oscillation amplitude in the settling region
+// Lower values indicate better D-term tuning (less oscillation)
+float measureOscillation(
+    const float *gyroSamples,
+    const float *dtermSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+)
+{
+    UNUSED(sampleRateHz);
+    
+    if (sampleCount < 30 || gyroSamples == NULL) {
+        return 1000.0f;  // Invalid - return high value
+    }
+    
+    // Focus on the settling region (last 60% of samples)
+    uint16_t settleStart = sampleCount * 4 / 10;  // Start at 40%
+    uint16_t settleEnd = sampleCount;
+    
+    // Find peak-to-peak oscillation in gyro signal
+    float gyroMin = gyroSamples[settleStart];
+    float gyroMax = gyroSamples[settleStart];
+    
+    for (uint16_t i = settleStart; i < settleEnd; i++) {
+        gyroMin = MIN(gyroMin, gyroSamples[i]);
+        gyroMax = MAX(gyroMax, gyroSamples[i]);
+    }
+    
+    float gyroOscillation = gyroMax - gyroMin;
+    
+    // If D-term samples available, also check D-term oscillation
+    float dtermOscillation = 0.0f;
+    if (dtermSamples != NULL) {
+        float dtermMin = dtermSamples[settleStart];
+        float dtermMax = dtermSamples[settleStart];
+        
+        for (uint16_t i = settleStart; i < settleEnd; i++) {
+            dtermMin = MIN(dtermMin, dtermSamples[i]);
+            dtermMax = MAX(dtermMax, dtermSamples[i]);
+        }
+        
+        dtermOscillation = dtermMax - dtermMin;
+    }
+    
+    // Return the larger of gyro or D-term oscillation
+    // D-term oscillation is weighted higher as it directly affects motor output
+    return MAX(gyroOscillation, dtermOscillation * 1.5f);
+}
+
+// Measure setpoint tracking accuracy for P-term optimization
+// Returns tracking accuracy as a ratio (0-1.0, higher is better)
+// Target is ~0.95 (95% tracking accuracy)
+float measureSetpointTracking(
+    const float *gyroSamples,
+    const float *setpointSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+)
+{
+    UNUSED(sampleRateHz);
+    
+    if (sampleCount < 20 || gyroSamples == NULL || setpointSamples == NULL) {
+        return 0.0f;  // Invalid - return worst case
+    }
+    
+    // Find the maneuver region (where setpoint is significant)
+    uint16_t maneuverStart = 0;
+    uint16_t maneuverEnd = sampleCount;
+    float peakSetpoint = 0.0f;
+    
+    for (uint16_t i = 0; i < sampleCount; i++) {
+        if (fabsf(setpointSamples[i]) > 50.0f) {
+            if (maneuverStart == 0) {
+                maneuverStart = i;
+            }
+            maneuverEnd = i;
+        }
+        if (fabsf(setpointSamples[i]) > fabsf(peakSetpoint)) {
+            peakSetpoint = setpointSamples[i];
+        }
+    }
+    
+    if (fabsf(peakSetpoint) < 10.0f) {
+        return 1.0f;  // No significant maneuver - assume tracking is fine
+    }
+    
+    // Calculate tracking accuracy as ratio of actual response to expected
+    // Focus on the region from 10% to 90% of response (rise time region)
+    float targetThreshold10 = peakSetpoint * 0.10f;
+    float targetThreshold90 = peakSetpoint * 0.90f;
+    
+    uint16_t idx10 = maneuverStart;
+    uint16_t idx90 = maneuverEnd;
+    
+    for (uint16_t i = maneuverStart; i < maneuverEnd; i++) {
+        if ((peakSetpoint > 0 && gyroSamples[i] >= targetThreshold10) ||
+            (peakSetpoint < 0 && gyroSamples[i] <= targetThreshold10)) {
+            idx10 = i;
+            break;
+        }
+    }
+    
+    for (uint16_t i = idx10; i < maneuverEnd; i++) {
+        if ((peakSetpoint > 0 && gyroSamples[i] >= targetThreshold90) ||
+            (peakSetpoint < 0 && gyroSamples[i] <= targetThreshold90)) {
+            idx90 = i;
+            break;
+        }
+    }
+    
+    // Calculate average tracking ratio in the tracking region (after reaching 90%)
+    float trackingSum = 0.0f;
+    uint16_t trackingCount = 0;
+    uint16_t trackRegionStart = idx90;
+    uint16_t trackRegionEnd = MIN(maneuverEnd, idx90 + 30);  // 30 samples after 90%
+    
+    for (uint16_t i = trackRegionStart; i < trackRegionEnd; i++) {
+        if (fabsf(setpointSamples[i]) > 10.0f) {
+            float ratio = gyroSamples[i] / setpointSamples[i];
+            // Clamp ratio to reasonable bounds
+            ratio = constrainf(ratio, 0.0f, 2.0f);
+            trackingSum += ratio;
+            trackingCount++;
+        }
+    }
+    
+    if (trackingCount > 0) {
+        float avgRatio = trackingSum / trackingCount;
+        // Convert to accuracy (1.0 = perfect, deviation reduces score)
+        float accuracy = 1.0f - fabsf(1.0f - avgRatio);
+        return constrainf(accuracy, 0.0f, 1.0f);
+    }
+    
+    return 0.5f;  // Default mid-range if we couldn't calculate
+}
+
+// Measure stick tracking during rapid movements for F-term optimization
+// Returns velocity-weighted lag (lower is better, 0 = perfect tracking)
+// This is the key metric for feedforward tuning
+float measureStickTracking(
+    const float *gyroSamples,
+    const float *setpointSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+)
+{
+    UNUSED(sampleRateHz);
+    
+    if (sampleCount < 10 || gyroSamples == NULL || setpointSamples == NULL) {
+        return 1000.0f;  // Invalid - return high value
+    }
+    
+    // Find peak setpoint and its index
+    float peakSetpoint = 0.0f;
+    uint16_t peakSetpointIdx = 0;
+    uint16_t maneuverStart = 0;
+    
+    for (uint16_t i = 0; i < sampleCount; i++) {
+        if (fabsf(setpointSamples[i]) > 50.0f && maneuverStart == 0) {
+            maneuverStart = i;
+        }
+        if (fabsf(setpointSamples[i]) > fabsf(peakSetpoint)) {
+            peakSetpoint = setpointSamples[i];
+            peakSetpointIdx = i;
+        }
+    }
+    
+    if (fabsf(peakSetpoint) < 10.0f || peakSetpointIdx <= maneuverStart) {
+        return 0.0f;  // No significant maneuver
+    }
+    
+    // Calculate velocity-weighted tracking error
+    // F-term is most important when stick is moving fast
+    float velocityWeightedErrorSum = 0.0f;
+    float velocityWeightSum = 0.0f;
+    
+    for (uint16_t i = maneuverStart + 1; i < peakSetpointIdx && i < sampleCount; i++) {
+        // Stick velocity = change in setpoint
+        float stickDelta = fabsf(setpointSamples[i] - setpointSamples[i-1]);
+        
+        // Only consider significant stick movements
+        if (stickDelta > 2.0f) {
+            // Tracking error at this instant (positive = gyro lagging)
+            float trackingErr = fabsf(setpointSamples[i]) - fabsf(gyroSamples[i]);
+            
+            // Weight error by velocity squared (emphasizes high-velocity regions)
+            float weight = stickDelta * stickDelta;
+            velocityWeightedErrorSum += trackingErr * weight;
+            velocityWeightSum += weight;
+        }
+    }
+    
+    if (velocityWeightSum > 0.01f) {
+        return velocityWeightedErrorSum / velocityWeightSum;
+    }
+    
+    return 0.0f;  // No rapid stick movement detected
+}
+
+// Measure long-term error/drift for I-term optimization
+// Returns accumulated error (lower is better)
+// Combines drift rate and steady-state error
+float measureLongTermError(
+    const float *gyroSamples,
+    const float *setpointSamples,
+    uint16_t sampleCount,
+    uint16_t sampleRateHz
+)
+{
+    if (sampleCount < 40 || gyroSamples == NULL || setpointSamples == NULL) {
+        return 1000.0f;  // Invalid - return high value
+    }
+    
+    const float samplePeriodMs = 1000.0f / sampleRateHz;
+    
+    // Find the settling region (last 30% of samples)
+    uint16_t settleStart = sampleCount * 7 / 10;
+    uint16_t settleEnd = sampleCount;
+    
+    // 1. Calculate steady-state error (average absolute error in settling region)
+    float steadyStateErrorSum = 0.0f;
+    uint16_t errorCount = 0;
+    
+    for (uint16_t i = settleStart; i < settleEnd; i++) {
+        float error = fabsf(gyroSamples[i] - setpointSamples[i]);
+        steadyStateErrorSum += error;
+        errorCount++;
+    }
+    
+    float steadyStateError = (errorCount > 0) ? (steadyStateErrorSum / errorCount) : 0.0f;
+    
+    // 2. Calculate drift rate using linear regression
+    float driftRate = 0.0f;
+    if (settleEnd - settleStart >= 10) {
+        float sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+        uint16_t n = settleEnd - settleStart;
+        
+        for (uint16_t i = settleStart; i < settleEnd; i++) {
+            float x = (float)(i - settleStart) * samplePeriodMs;
+            float y = gyroSamples[i];
+            sumX += x;
+            sumY += y;
+            sumXY += x * y;
+            sumX2 += x * x;
+        }
+        
+        float denom = n * sumX2 - sumX * sumX;
+        if (fabsf(denom) > 0.001f) {
+            // Slope in deg/s per ms, convert to deg/s per second
+            driftRate = fabsf(((n * sumXY - sumX * sumY) / denom) * 1000.0f);
+        }
+    }
+    
+    // 3. Combine metrics: steady-state error + drift contribution
+    // Drift is weighted higher as it accumulates over time
+    float longTermError = steadyStateError + driftRate * 0.5f;
+    
+    return longTermError;
+}
+
+// Get metric value from pre-computed metrics structure
+// Convenient wrapper for Newton's method to get the right metric
+float getMetricFromAnalysis(const autotuneMetrics_t *metrics, tuneMetric_e metricType)
+{
+    if (metrics == NULL || !metrics->isValid) {
+        return 1000.0f;  // Invalid - return high value
+    }
+    
+    switch (metricType) {
+        case METRIC_MOTOR_RMS:
+            return metrics->noiseRms;
+            
+        case METRIC_OSCILLATION:
+            return metrics->oscillationAmplitude;
+            
+        case METRIC_SETPOINT_TRACKING:
+            // Convert tracking error to accuracy (lower error = higher accuracy)
+            // Tracking error of 0 = 1.0 (100%), error of 100 = 0.0
+            return constrainf(1.0f - (metrics->trackingError / 100.0f), 0.0f, 1.0f);
+            
+        case METRIC_STICK_TRACKING:
+            return metrics->velocityWeightedLag;
+            
+        case METRIC_LONG_TERM_ERROR:
+            // Combine drift and steady-state error
+            return fabsf(metrics->driftRate) + metrics->steadyStateError;
+            
+        case METRIC_OVERSHOOT:
+            return metrics->overshootPercent;
+            
+        case METRIC_SETTLING_TIME:
+            return metrics->settlingTimeMs;
+            
+        default:
+            return 1000.0f;
+    }
 }
 
 #endif // USE_AUTOTUNE

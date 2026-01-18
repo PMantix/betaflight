@@ -33,8 +33,11 @@
 #define MANEUVER_MIN_DURATION_MS        100     // minimum maneuver duration
 
 // Hover detection thresholds
-#define HOVER_GYRO_THRESHOLD            30.0f   // deg/s max for "settled"
-#define HOVER_STICK_THRESHOLD           0.15f   // max stick deflection
+// Primary check: setpoint (pilot intent) must be low - this is what matters
+// Secondary check: gyro rate as sanity check (quad not spinning out of control)
+#define HOVER_SETPOINT_THRESHOLD        25.0f   // deg/s max setpoint for "hovering" (pilot not commanding)
+#define HOVER_GYRO_THRESHOLD           150.0f   // deg/s max gyro (sanity check only - natural wobble is OK)
+#define HOVER_STICK_THRESHOLD           0.15f   // max stick deflection (redundant with setpoint but fast check)
 #define HOVER_STABLE_TIME_MS            500     // time to confirm hover
 
 // Analysis thresholds
@@ -44,9 +47,14 @@
 #define OSCILLATION_THRESHOLD          80.0f    // D-term oscillation amplitude
 
 // Gain adjustment limits
-#define GAIN_ADJUST_STEP_PERCENT        8.0f    // Base adjustment step
+#define GAIN_ADJUST_STEP_PERCENT        8.0f    // Base adjustment step (after probe)
+#define GAIN_PROBE_STEP_PERCENT        25.0f    // Initial large probe step for Newton's method
 #define GAIN_MIN_VALUE                  10      // Minimum PID value
 #define GAIN_MAX_VALUE                  250     // Maximum PID value
+
+// Newton's method F-term tuning
+#define F_TERM_TARGET_LAG               5.0f    // Target velocityWeightedLag (near zero)
+#define F_TERM_MIN_HISTORY              2       // Need at least 2 points for Newton's method
 
 // ============================================================================
 // FILTER FREQUENCY LIMITS (Hz)
@@ -148,6 +156,7 @@
 #define REASON_DIAG_FIX_PITCH           1561    // Identified Pitch as dominant, applying fix
 #define REASON_DIAG_FIX_GYRO_LPF1       1562    // Identified Gyro LPF1 as dominant, applying fix
 #define REASON_DIAG_FIX_DTERM_LPF1      1563    // Identified Dterm LPF1 as dominant, applying fix
+#define REASON_DIAG_MULTI_VAR_FIX       1565    // Multi-variable fix applied to multiple parameters
 #define REASON_DIAG_NO_IMPROVEMENT      1570    // No test showed >10% improvement
 #define REASON_DIAG_TARGET_REACHED      1580    // Motor RMS within target
 #define REASON_DIAG_MAX_ITERATIONS      1590    // Max diagnostic iterations reached
@@ -236,6 +245,11 @@ typedef enum {
     HOVER_DIAG_VERIFY_BASELINE,     // Reconfirm baseline after all tests (settings restored)
     HOVER_DIAG_ANALYZING,           // Comparing results
     HOVER_DIAG_COMPLETE,            // Diagnostic cycle done
+    // Relaxation phases - try RAISING parameters when noise is excellent
+    HOVER_DIAG_RELAX_ROLL,          // Test Roll gains * 1.5
+    HOVER_DIAG_RELAX_PITCH,         // Test Pitch gains * 1.5
+    HOVER_DIAG_RELAX_GYRO_LPF1,     // Test Gyro LPF1 + 50Hz
+    HOVER_DIAG_RELAX_DTERM_LPF1,    // Test Dterm LPF1 + 25Hz
     HOVER_DIAG_PHASE_COUNT
 } hoverDiagPhase_e;
 
@@ -295,6 +309,7 @@ typedef enum {
 // Response metrics from analysis
 typedef struct {
     float overshootPercent;         // Peak overshoot as percentage
+    float dampingRatio;             // ζ: <0.7 underdamped, 0.7-1.0 optimal, >1.0 overdamped
     float riseTimeMs;               // Time to reach 90% of target
     float settlingTimeMs;           // Time to stay within 5% band
     float trackingError;            // Average error after settling
@@ -338,6 +353,8 @@ typedef struct {
     float overshoot;
     float riseTime;
     float noise;
+    float velocityWeightedLag;      // Key metric for F-term Newton's method
+    float steadyStateError;         // Key metric for I-term Newton's method
     float score;
     autotuneResponseClass_e responseClass;
 } autotuneHistoryEntry_t;
