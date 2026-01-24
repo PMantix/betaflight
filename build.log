@@ -1,0 +1,29 @@
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+%% (optimised) ./src/main/flight/autotune_v2/autotune_core.c 
+./src/main/flight/autotune_v2/autotune_core.c: In function 'applyPGain':
+./src/main/flight/autotune_v2/autotune_core.c:324:5: error: 'currentPidProfile' undeclared (first use in this function); did you mean 'resetPidProfile'?
+  324 |     currentPidProfile->pid[axis].P = pValue;
+      |     ^~~~~~~~~~~~~~~~~
+      |     resetPidProfile
+./src/main/flight/autotune_v2/autotune_core.c:324:5: note: each undeclared identifier is reported only once for each function it appears in
+./src/main/flight/autotune_v2/autotune_core.c:321:32: error: parameter 'axis' set but not used [-Werror=unused-but-set-parameter]
+  321 | static void applyPGain(uint8_t axis, float newP)
+      |                        ~~~~~~~~^~~~
+./src/main/flight/autotune_v2/autotune_core.c: In function 'statePdRatioSeekEnter':
+./src/main/flight/autotune_v2/autotune_core.c:453:23: error: 'currentPidProfile' undeclared (first use in this function); did you mean 'resetPidProfile'?
+  453 |     axis->originalP = currentPidProfile->pid[runtime.currentAxisIndex].P;
+      |                       ^~~~~~~~~~~~~~~~~
+      |                       resetPidProfile
+./src/main/flight/autotune_v2/autotune_core.c: At top level:
+./src/main/flight/autotune_v2/autotune_core.c:332:27: error: 'pdRatioSeekDecision' defined but not used [-Werror=unused-function]
+  332 | static autotuneDecision_e pdRatioSeekDecision(
+      |                           ^~~~~~~~~~~~~~~~~~~
+./src/main/flight/autotune_v2/autotune_core.c:321:13: error: 'applyPGain' defined but not used [-Werror=unused-function]
+  321 | static void applyPGain(uint8_t axis, float newP)
+      |             ^~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+make[2]: *** [Makefile:525: obj/main/STM32G47X_BETAFPVG473/flight/autotune_v2/autotune_core.o] Error 1
+make[1]: *** [Makefile:666: hex] Error 2
+make: *** [Makefile:683: fwo] Error 2

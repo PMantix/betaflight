@@ -51,11 +51,16 @@
 #include "fc/rc.h"
 #include "fc/dispatch.h"
 #include "fc/rc_controls.h"
+#include "fc/rc_modes.h"
 #include "fc/runtime_config.h"
 
 #include "flight/alt_hold.h"
 #include "flight/gps_rescue.h"
 #include "flight/imu.h"
+
+#ifdef USE_AUTOTUNE_V2
+#include "flight/autotune_v2/autotune_core.h"
+#endif
 #include "flight/mixer.h"
 #include "flight/pid.h"
 #include "flight/position.h"
@@ -252,6 +257,25 @@ static void taskGpsRescue(timeUs_t currentTimeUs)
 }
 #endif
 
+#ifdef USE_AUTOTUNE_V2
+static void taskAutotune(timeUs_t currentTimeUs)
+{
+    static bool lastAutotuneEnabled = false;
+    const bool autotuneEnabled = ARMING_FLAG(ARMED) && IS_RC_MODE_ACTIVE(BOXAUTOTUNE);
+    
+    // Handle activation/deactivation
+    if (autotuneEnabled != lastAutotuneEnabled) {
+        autotuneUpdateActivation(autotuneEnabled, currentTimeUs);
+        lastAutotuneEnabled = autotuneEnabled;
+    }
+    
+    // Run autotune update if active
+    if (autotuneEnabled) {
+        autotuneUpdate(currentTimeUs);
+    }
+}
+#endif
+
 #ifdef USE_BARO
 static void taskUpdateBaro(timeUs_t currentTimeUs)
 {
@@ -391,6 +415,10 @@ task_attribute_t task_attributes[TASK_COUNT] = {
 
 #ifdef USE_GPS_RESCUE
     [TASK_GPS_RESCUE] = DEFINE_TASK("GPS_RESCUE", NULL, NULL, taskGpsRescue, TASK_PERIOD_HZ(TASK_GPS_RESCUE_RATE_HZ), TASK_PRIORITY_MEDIUM),
+#endif
+
+#ifdef USE_AUTOTUNE_V2
+    [TASK_AUTOTUNE] = DEFINE_TASK("AUTOTUNE", NULL, NULL, taskAutotune, TASK_PERIOD_HZ(100), TASK_PRIORITY_MEDIUM),
 #endif
 
 #ifdef USE_ALTITUDE_HOLD
@@ -565,6 +593,11 @@ void tasksInit(void)
 
 #ifdef USE_GPS_RESCUE
     setTaskEnabled(TASK_GPS_RESCUE, featureIsEnabled(FEATURE_GPS));
+#endif
+
+#ifdef USE_AUTOTUNE_V2
+    autotuneInit();  // SFA-001 fix: Initialize autotune before enabling task
+    setTaskEnabled(TASK_AUTOTUNE, true);
 #endif
 
 #ifdef USE_ALTITUDE_HOLD

@@ -193,6 +193,7 @@
 #define USE_MCO_DEVICE1
 #define USE_DMA_SPEC
 #define USE_LATE_TASK_STATISTICS
+#define USE_AUTOTUNE_V2
 #endif
 
 #if defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4)

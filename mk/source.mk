@@ -4,6 +4,7 @@ PG_SRC = \
             pg/alt_hold_wing.c \
             pg/autopilot_multirotor.c \
             pg/autopilot_wing.c \
+            pg/autotune.c \
             pg/beeper.c \
             pg/beeper_dev.c \
             pg/board.c \
@@ -175,6 +176,12 @@ COMMON_SRC = \
             flight/rpm_filter.c \
             flight/servos.c \
             flight/servos_tricopter.c \
+            flight/autotune_v2/autotune_core.c \
+            flight/autotune_v2/autotune_event.c \
+            flight/autotune_v2/autotune_filter.c \
+            flight/autotune_v2/autotune_metrics.c \
+            flight/autotune_v2/autotune_rollback.c \
+            flight/autotune_v2/autotune_feedback.c \
             io/serial_4way.c \
             io/serial_4way_avrootloader.c \
             io/serial_4way_stk500v2.c \

@@ -48,6 +48,10 @@
 #include "flight/autopilot.h"
 #include "flight/gps_rescue.h"
 #include "flight/imu.h"
+
+#ifdef USE_AUTOTUNE_V2
+#include "flight/autotune_v2/autotune_feedback.h"
+#endif
 #include "flight/mixer.h"
 #include "flight/rpm_filter.h"
 
@@ -1251,6 +1255,14 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 #endif // USE_CHIRP
 
         float currentPidSetpoint = getSetpointRate(axis);
+        
+#ifdef USE_AUTOTUNE_V2
+        // Add autotune wiggle offset to roll axis for state transition feedback
+        if (axis == FD_ROLL) {
+            currentPidSetpoint += autotuneFeedbackGetRollOffset();
+        }
+#endif // USE_AUTOTUNE_V2
+
         if (pidRuntime.maxVelocity[axis]) {
             currentPidSetpoint = accelerationLimit(axis, currentPidSetpoint);
         }

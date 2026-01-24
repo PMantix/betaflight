@@ -114,6 +114,10 @@
 #include "pg/stats.h"
 #include "pg/board.h"
 
+#ifdef USE_AUTOTUNE_V2
+#include "pg/autotune.h"
+#endif
+
 #include "rx/a7105_flysky.h"
 #include "rx/cc2500_frsky_common.h"
 #include "rx/cc2500_sfhss.h"
@@ -2032,6 +2036,22 @@ const clivalue_t valueTable[] = {
     { "gimbal_yaw_limit",          VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { -100, 100 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_yaw_limit) },
     { "gimbal_stabilisation",      VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 7 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_stabilisation) },
     { "gimbal_sensitivity",        VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { -16, 15 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_sensitivity) },
+#endif
+
+// PG_AUTOTUNE_CONFIG
+#ifdef USE_AUTOTUNE_V2
+    { "autotune_enabled",           VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 1 },   PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, enabled) },
+    { "autotune_axes",              VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 7 },   PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, axes) },
+    { "autotune_aggressiveness",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 100 }, PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, aggressiveness) },
+    { "autotune_p_step",            VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 30 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, pStepPercent) },
+    { "autotune_d_step",            VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 30 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, dStepPercent) },
+    { "autotune_f_step",            VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 50 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, fStepPercent) },
+    { "autotune_tune_ff",           VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 1 },   PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, tuneFeedforward) },
+    { "autotune_stick_threshold",   VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 50 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, stickThreshold) },
+    { "autotune_cross_axis_max",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 30 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, crossAxisThreshold) },
+    { "autotune_max_events",        VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 3, 20 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, maxEventsPerAxis) },
+    { "autotune_overshoot_low",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 20 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, overshootTargetLow) },
+    { "autotune_overshoot_high",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 30 },  PG_AUTOTUNE_CONFIG, offsetof(autotuneConfig_t, overshootTargetHigh) },
 #endif
 };
 

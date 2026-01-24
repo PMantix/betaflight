@@ -1,0 +1,4 @@
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+make[2]: 'obj/betaflight_2026.6.0-alpha_STM32G47X_BETAFPVG473.hex' is up to date.

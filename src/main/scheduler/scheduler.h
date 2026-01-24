@@ -119,6 +119,9 @@ typedef enum {
 #ifdef USE_GPS_RESCUE
     TASK_GPS_RESCUE,
 #endif
+#ifdef USE_AUTOTUNE_V2
+    TASK_AUTOTUNE,
+#endif
 #ifdef USE_ALTITUDE_HOLD
     TASK_ALTHOLD,
 #endif

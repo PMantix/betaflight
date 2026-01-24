@@ -1,0 +1,163 @@
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'docs/autotune_v2/PROGRESS.md', CRLF will be replaced by LF the next time Git touches it
+EF HASH -> ./obj/main/STM32G47X_BETAFPVG473/.efhash_5ed1a7a2a7bc9d4688ba05d3edf32c44
+%% startup_stm32g474xx.s 
+%% (optimised) ./src/platform/STM32/bus_i2c_hal.c 
+%% (size optimised) ./src/main/drivers/bus_i2c_timing.c 
+%% (speed optimised) ./src/main/drivers/accgyro/accgyro_mpu.c 
+%% (optimised) ./src/platform/STM32/adc_stm32g4xx.c 
+%% (speed optimised) ./src/main/drivers/bus_quadspi.c 
+%% (optimised) ./src/main/drivers/dshot_bitbang_decode.c 
+%% (optimised) ./src/platform/STM32/dma_stm32g4xx.c 
+%% (optimised) ./src/platform/STM32/bus_quadspi_hal.c 
+%% (size optimised) ./src/platform/STM32/bus_i2c_hal_init.c 
+%% (optimised) ./src/platform/STM32/bus_spi_ll.c 
+%% (optimised) ./src/platform/STM32/dma_reqmap_mcu.c 
+%% (optimised) ./src/platform/STM32/system_stm32g4xx.c 
+%% (optimised) ./src/main/drivers/adc.c 
+%% (optimised) ./src/platform/STM32/memprot_hal.c 
+%% (optimised) ./src/platform/STM32/serial_uart_stm32g4xx.c 
+%% (optimised) ./src/platform/STM32/dshot_bitbang_ll.c 
+%% (optimised) ./src/platform/STM32/persistent.c 
+%% (optimised) ./src/platform/STM32/io_stm32.c 
+%% (optimised) ./src/platform/STM32/memprot_stm32g4xx.c 
+%% (speed optimised) ./src/platform/STM32/exti.c 
+%% (optimised) ./src/platform/STM32/pwm_output_dshot_hal.c 
+%% (speed optimised) ./src/platform/common/stm32/system.c 
+%% (size optimised) ./src/platform/common/stm32/config_flash.c 
+%% (optimised) ./src/platform/STM32/dshot_bitbang.c 
+%% (optimised) ./src/platform/STM32/transponder_ir_io_hal.c 
+%% (optimised) ./src/platform/STM32/debug.c 
+%% (optimised) ./src/platform/STM32/startup/system_stm32g4xx.c 
+%% (optimised) ./src/main/msc/usbd_storage_emfat.c 
+%% (size optimised) ./src/main/drivers/serial_escserial.c 
+%% (optimised) ./src/platform/STM32/usb_msc_hal.c 
+%% (size optimised) ./src/platform/common/stm32/bus_spi_pinconfig.c 
+%% (optimised) ./src/main/common/chirp.c 
+%% (optimised) ./src/main/drivers/flash/flash_w25m.c 
+%% (optimised) ./src/main/common/gps_conversion.c 
+%% (optimised) ./src/platform/common/stm32/ledstrip_ws2811_stm32.c 
+%% (size optimised) ./src/main/fc/board_info.c 
+%% (optimised) ./src/main/msc/usbd_storage_sd_spi.c 
+%% (optimised) ./src/main/drivers/bus_i2c_busdev.c 
+%% (size optimised) ./src/main/drivers/bus_spi_config.c 
+%% (optimised) ./src/main/build/version.c 
+%% (optimised) ./src/platform/common/stm32/mco.c 
+%% (optimised) ./src/main/drivers/transponder_ir_ilap.c 
+%% (optimised) ./src/main/io/asyncfatfs/fat_standard.c 
+%% (optimised) ./src/main/io/piniobox.c 
+%% (optimised) ./src/platform/common/stm32/serial_uart_hw.c 
+%% (optimised) ./src/main/drivers/stack_check.c 
+%% (optimised) ./src/main/drivers/timer_common.c 
+%% (optimised) ./src/platform/STM32/serial_uart_hal.c 
+%% (speed optimised) ./src/platform/STM32/pwm_output_hw.c 
+%% (speed optimised) ./src/main/fc/tasks.c 
+%% (optimised) ./src/main/msp/msp.c 
+%% (speed optimised) ./src/platform/common/stm32/dshot_bitbang_shared.c 
+%% (optimised) ./src/platform/STM32/timer_stm32g4xx.c 
+%% (speed optimised) ./src/main/rx/sbus.c 
+%% arm_bitreversal2.S 
+%% (optimised) ./src/main/build/build_config.c 
+%% (optimised) ./src/main/common/printf_serial.c 
+%% (optimised) ./src/main/fc/hardfaults.c 
+%% (speed optimised) ./src/platform/common/stm32/io_impl.c 
+%% (size optimised) ./src/platform/common/stm32/serial_uart_pinconfig.c 
+%% (optimised) ./src/main/common/printf.c 
+%% (optimised) ./src/main/fc/dispatch.c 
+%% (optimised) ./src/main/drivers/sdcard_spi.c 
+%% (optimised) ./src/main/drivers/bus_i2c_soft.c 
+%% (optimised) ./src/main/common/huffman.c 
+%% (optimised) ./src/main/drivers/camera_control.c 
+%% (optimised) ./src/main/build/debug.c 
+%% (optimised) ./src/main/msc/emfat_file.c 
+%% (optimised) ./src/main/common/streambuf.c 
+%% (speed optimised) ./src/platform/common/stm32/bus_spi_hw.c 
+%% (optimised) ./src/main/drivers/sdcard_sdio_baremetal.c 
+%% (optimised) ./src/platform/STM32/light_ws2811strip_hal.c 
+%% (optimised) ./src/platform/STM32/rcc_stm32.c 
+%% (optimised) ./src/main/rx/rx_spi_common.c 
+%% (size optimised) ./src/main/main.c 
+%% (optimised) ./src/main/drivers/transponder_ir_erlt.c 
+%% (optimised) ./src/main/drivers/pinio.c 
+%% (optimised) ./src/main/drivers/resource.c 
+%% (optimised) ./src/main/rx/pwm.c 
+%% (optimised) ./src/platform/STM32/camera_control_stm32.c 
+%% (speed optimised) ./src/main/common/maths.c 
+%% (optimised) ./src/main/drivers/buttons.c 
+%% (optimised) ./src/platform/common/stm32/dshot_dpwm.c 
+%% (optimised) ./src/main/drivers/pin_pull_up_down.c 
+%% (size optimised) ./src/main/drivers/serial_pinconfig.c 
+%% (speed optimised) ./src/main/drivers/serial.c 
+%% (speed optimised) ./src/main/common/sdft.c 
+%% (optimised) ./src/platform/STM32/timer_hal.c 
+%% (size optimised) ./src/platform/common/stm32/pwm_output_beeper.c 
+%% (speed optimised) ./src/main/rx/spektrum.c 
+%% (optimised) ./src/platform/common/stm32/debug_pin.c 
+%% (optimised) ./src/main/common/string_light.c 
+%% (optimised) ./src/main/io/smartaudio_protocol.c 
+%% (size optimised) ./src/main/config/simplified_tuning.c 
+%% (optimised) ./src/main/drivers/flash/flash_w25n.c 
+%% (optimised) ./src/main/io/beeper.c 
+%% (optimised) ./src/main/io/flashfs.c 
+%% (optimised) ./src/platform/common/stm32/camera_control.c 
+%% (optimised) ./src/main/drivers/display_canvas.c 
+%% (speed optimised) ./src/main/common/vector.c 
+%% (optimised) ./src/main/msc/usbd_storage.c 
+%% (optimised) ./src/main/drivers/sdcard_standard.c 
+%% (speed optimised) ./src/platform/common/stm32/pwm_output_dshot_shared.c 
+%% (optimised) ./src/main/fc/stats.c 
+%% (size optimised) ./src/main/io/serial.c 
+%% (optimised) ./src/main/drivers/serial_impl.c 
+%% (optimised) ./src/main/io/tramp_protocol.c 
+%% (optimised) ./src/main/msc/usbd_storage_sdio.c 
+%% (optimised) ./src/main/drivers/flash/flash.c 
+%% (optimised) ./src/main/drivers/sdcard.c 
+%% (size optimised) ./src/main/io/transponder_ir.c 
+%% (optimised) ./src/main/drivers/pwm_output.c 
+%% (optimised) ./src/main/drivers/dma_common.c 
+%% (speed optimised) ./src/main/fc/runtime_config.c 
+%% (optimised) ./src/main/io/asyncfatfs/asyncfatfs.c 
+%% (size optimised) ./src/main/config/config_streamer.c 
+%% (optimised) ./src/main/drivers/io_preinit.c 
+%% (size optimised) ./src/platform/common/stm32/bus_i2c_pinconfig.c 
+%% (optimised) ./src/main/common/sensor_alignment.c 
+%% (optimised) ./src/main/common/crc.c 
+%% (optimised) ./src/main/drivers/motor.c 
+%% (optimised) ./src/main/drivers/display.c 
+%% (optimised) ./src/platform/common/stm32/adc_impl.c 
+%% (optimised) ./src/main/drivers/flash/flash_m25p16.c 
+%% (optimised) ./src/main/drivers/usb_msc_common.c 
+%% (optimised) ./src/main/msc/emfat.c 
+%% (size optimised) ./src/main/cli/settings.c 
+%% (optimised) ./src/main/drivers/flash/flash_w25q128fv.c 
+%% (optimised) ./src/main/common/bitarray.c 
+%% (optimised) ./src/main/drivers/light_led.c 
+%% (speed optimised) ./src/main/drivers/buf_writer.c 
+%% (optimised) ./src/main/drivers/dshot_command.c 
+%% (speed optimised) ./src/main/drivers/io.c 
+%% (optimised) ./src/main/drivers/bus_octospi.c 
+%% (optimised) ./src/main/drivers/transponder_ir_arcitimer.c 
+%% (optimised) ./src/main/drivers/sound_beeper.c 
+%% (optimised) ./src/main/common/colorconversion.c 
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/rx/rx_spi_common.o'
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/drivers/timer_common.o'
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/drivers/camera_control.o'
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/drivers/bus_i2c_busdev.o'
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/msc/usbd_storage_emfat.o'
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/drivers/flash/flash_w25n.o'
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/common/stm32/bus_spi_hw.o'
+%% (speed optimised) ./src/main/common/filter.c 
+make[2]: *** Deleting file 'obj/main/STM32G47X_BETAFPVG473/common/stm32/mco.o'
+%% (optimised) ./src/main/drivers/bus_i2c_utils.c 
+%% (optimised) ./src/main/flight/autopilot_multirotor.c 
+%% (optimised) ./src/main/drivers/rx/rx_xn297.c 
+%% (optimised) ./src/main/flight/alt_hold_wing.c 
+%% (optimised) ./src/main/drivers/dshot.c 
+%% (speed optimised) ./src/main/common/pwl.c 
+%% (optimised) ./src/main/fc/rc_modes.c 
+%% (optimised) ./src/main/sensors/current.c 
+%% (optimised) ./src/main/sensors/adcinternal.c 
+%% (size optimised) ./src/main/config/feature.c 
+%% (optimised) ./src/main/config/config.c 
+%% (speed optimised) ./src/main/common/stopwatch.c 

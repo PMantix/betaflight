@@ -109,6 +109,10 @@ bool cliMode = false;
 #include "flight/position.h"
 #include "flight/servos.h"
 
+#ifdef USE_AUTOTUNE_V2
+#include "flight/autotune_v2/autotune_core.h"
+#endif
+
 #include "io/asyncfatfs/asyncfatfs.h"
 #include "io/beeper.h"
 #include "io/flashfs.h"
@@ -6558,11 +6562,17 @@ typedef struct {
 #endif
 
 static void cliHelp(const char *cmdName, char *cmdline);
+#ifdef USE_AUTOTUNE_V2
+static void cliAutotune(const char *cmdName, char *cmdline);
+#endif
 
 // should be sorted a..z for bsearch()
 const clicmd_t cmdTable[] = {
     CLI_COMMAND_DEF("adjrange", "configure adjustment ranges", "<index> <unused> <range channel> <start> <end> <function> <select channel> [<center> <scale>]", cliAdjustmentRange),
     CLI_COMMAND_DEF("aux", "configure modes", "<index> <mode> <aux> <start> <end> <logic>", cliAux),
+#ifdef USE_AUTOTUNE_V2
+    CLI_COMMAND_DEF("autotune", "show autotune status", NULL, cliAutotune),
+#endif
 #ifdef USE_CLI_BATCH
     CLI_COMMAND_DEF("batch", "start or end a batch of commands", "start | end", cliBatch),
 #endif
@@ -6717,6 +6727,31 @@ const clicmd_t cmdTable[] = {
     CLI_COMMAND_DEF("vtxtable", "vtx frequency table", "<band> <bandname> <bandletter> [FACTORY|CUSTOM] <freq> ... <freq>\r\n", cliVtxTable),
 #endif
 };
+
+#ifdef USE_AUTOTUNE_V2
+static const char * const autotuneStateNames[] = {
+    "IDLE", "HOVER_LOCK", "THROTTLE_SWEEP", "NOISE_CONFIRM",
+    "PD_RATIO_SEEK", "PD_SCALE_UP", "F_TUNE", "PD_RETUNE_AFTER_F", "COMPLETE"
+};
+
+static const char * const autotuneAxisNames[] = { "ROLL", "PITCH", "YAW" };
+
+static void cliAutotune(const char *cmdName, char *cmdline)
+{
+    UNUSED(cmdName);
+    UNUSED(cmdline);
+    
+    cliPrintLinef("Autotune V2 Status");
+    cliPrintLinef("==================");
+    
+    const autotuneState_e state = autotuneGetState();
+    cliPrintLinef("State: %s", state < AUTOTUNE_STATE_COUNT ? autotuneStateNames[state] : "UNKNOWN");
+    cliPrintLinef("Active: %s", autotuneIsActive() ? "Yes" : "No");
+    cliPrintLinef("Current Axis: %s", autotuneAxisNames[autotuneGetCurrentAxis()]);
+    cliPrintLinef("Progress: %d%%", autotuneGetProgress());
+    cliPrintLinef("Last Reason: %d", autotuneGetReasonCode());
+}
+#endif
 
 static void cliHelp(const char *cmdName, char *cmdline)
 {
