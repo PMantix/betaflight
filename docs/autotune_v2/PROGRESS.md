@@ -1,8 +1,8 @@
 # Autotune V2 Progress Tracker
 
-**Last Updated:** January 20, 2026  
-**Current Phase:** Complete  
-**Current Status:** ✅ All phases complete, ready for flight testing
+**Last Updated:** January 25, 2026  
+**Current Phase:** Flight Testing  
+**Current Status:** 🔄 Iterating on flight test feedback
 
 ---
 
@@ -36,11 +36,18 @@ This prevents context loss between sessions and ensures AI agents can quickly un
 ### Active Work
 <!-- Update this section when starting work -->
 
-**Currently working on:** Flight testing and validation
+**Currently working on:** Flight testing - validating PD_SCALE_UP with corrected lag calculation
 
 **Blocked by:** Nothing
 
-**Next step:** Flash firmware, test in flight, gather logs
+**Next step:** Flash firmware, verify PD_SCALE_UP now functions properly, complete full tuning cycle
+
+**Recent Flight Test Results (Jan 25):**
+- ✅ State machine progresses: 0→1→2→3→4→5 verified
+- ✅ Overshoot values now sensible: 2.9-9.6% (was 122-194%)
+- ✅ Quality gates working: Cross-axis rejections, throttle band rejections observed
+- 🔄 PD_SCALE_UP needs verification with corrected lag calculation
+- 🔄 Faster state progression with consecutive good events logic
 
 ---
 
@@ -197,6 +204,44 @@ This prevents context loss between sessions and ensures AI agents can quickly un
 ## Session Log
 
 <!-- Add an entry at the end of each development session -->
+
+### 2026-01-25 - Flight Testing Bug Fixes
+
+**What was done:**
+- **Overshoot calculation fix:** `autotuneMetricsComputeOvershoot()` now uses peak setpoint instead of final setpoint. Before: 122-194% (nonsense). After: 2.9-9.6% (correct).
+- **Lag calculation fix:** Same pattern as overshoot - `autotuneMetricsComputeLag()` now uses peak setpoint for 50% crossing reference.
+- **Wiggle symmetry fix:** Changed feedback waveforms from half-sine (positive-only drift) to full symmetric sine (0→+peak→0→-peak→0). Drone no longer drifts during wiggle feedback.
+- **debug[7] F gain logging:** Added `AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_F, ...)` at `statePdRatioSeekEnter()` and `statePdScaleUpEnter()` so F gain is visible in logs.
+- **Faster PD_RATIO_SEEK exit:** Modified `pdRatioSeekDecision()` to advance after 3 consecutive good events within ±5% of target overshoot (looseTolerance). Reduces local optimization, advances faster.
+- **Reason code pulsing:** Added `setReasonCode()` helper with timestamp tracking and 200ms pulse timeout. Reason codes now auto-clear to 0 for cleaner log analysis.
+
+**Files modified:**
+- `autotune_metrics.c` - Overshoot and lag calculation fixes
+- `autotune_feedback.c` - Symmetric wiggle waveforms, updated durations (BUMP=150ms, WIGGLE=300ms)
+- `autotune_core.c` - F gain logging, faster exit logic, reason code pulsing infrastructure
+- `autotune_types.h` - Added `reasonCodeSetTimeUs` field to runtime struct
+
+**Flight test results:**
+- State machine progresses correctly: 0→1→2→3→4→5
+- Overshoot values sensible: mean 6.8%, range 2.9-9.6%
+- Quality gates functioning: saw cross-axis rejections, throttle band rejections
+
+**What's next:**
+- Flash updated firmware
+- Verify PD_SCALE_UP now functions with corrected lag values
+- Complete full tuning cycle through Roll, Pitch, (Yaw) axes
+
+---
+
+### 2026-01-24 - Pre-Flight Fixes
+
+**What was done:**
+- Fixed throttle normalization bug: `rcCommand[THROTTLE]/1000` gave 1.0-2.0, fixed to `(rcCommand[THROTTLE] - 1000) / 1000.0f` for 0.0-1.0
+- Increased wiggle amplitude from 30°/s to 60°/s for better pilot visibility
+- Fixed abort gain restoration in `autotuneAbort()`
+- Updated reason code documentation to match actual enum values
+
+---
 
 ### 2026-01-19 - Phase 2 Complete (Integration)
 

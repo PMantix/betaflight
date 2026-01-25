@@ -37,13 +37,14 @@
 // Constants
 // ============================================================================
 
-// Two basic element types: BUMP (half-sine, quick) and WIGGLE (full sine, slower)
-#define BUMP_DURATION_US        100000  // 100ms half-sine (nudge)
-#define WIGGLE_DURATION_US      200000  // 200ms full sine (sway)
-#define ABORT_BUMP_DURATION_US   50000  // 50ms rapid bump for abort pattern
+// Two basic element types: BUMP (quick symmetric pulse) and WIGGLE (full sine, slower)
+// All patterns are SYMMETRIC - net displacement is zero to prevent drift
+#define BUMP_DURATION_US        150000  // 150ms symmetric pulse (+/- half-sines)
+#define WIGGLE_DURATION_US      300000  // 300ms full symmetric cycle
+#define ABORT_BUMP_DURATION_US  100000  // 100ms rapid symmetric pulse for abort
 #define ELEMENT_PAUSE_US         50000  // 50ms pause between elements
 #define ABORT_PAUSE_US           25000  // 25ms short pause for abort (more urgent)
-#define WIGGLE_AMPLITUDE_DPS    30.0f   // 30 deg/s amplitude
+#define WIGGLE_AMPLITUDE_DPS    60.0f   // 60 deg/s amplitude
 
 // Pattern element types
 typedef enum {
@@ -218,14 +219,16 @@ void autotuneFeedbackUpdate(timeUs_t currentTimeUs)
             feedbackState.currentOffset = 0.0f;
         }
     } else {
-        // Generate waveform based on element type
+        // Generate SYMMETRIC waveforms - net displacement is always zero
         const float phase = (float)phaseDuration / (float)elementDuration;
         
         if (element == ELEMENT_BUMP || element == ELEMENT_ABORT_BUMP) {
-            // Half-sine: just the positive lobe (0 -> 1 -> 0)
-            feedbackState.currentOffset = sin_approx(phase * M_PIf) * WIGGLE_AMPLITUDE_DPS;
+            // Symmetric bump: full sine wave (0 -> +peak -> 0 -> -peak -> 0)
+            // This ensures no net displacement/drift
+            feedbackState.currentOffset = sin_approx(phase * 2.0f * M_PIf) * WIGGLE_AMPLITUDE_DPS;
         } else {
-            // Full sine wave (0 -> 1 -> 0 -> -1 -> 0)
+            // Wiggle: same as bump but longer duration for more visible sway
+            // Full sine wave (0 -> +peak -> 0 -> -peak -> 0)
             feedbackState.currentOffset = sin_approx(phase * 2.0f * M_PIf) * WIGGLE_AMPLITUDE_DPS;
         }
     }
@@ -277,6 +280,18 @@ void autotuneFeedbackStateAdvance(uint8_t stateNumber)
     if (stateNumber > 0 && stateNumber <= 8) {
         startStatePattern(stateNumber, micros());
     }
+}
+
+void autotuneFeedbackAbort(void)
+{
+    // Special abort pattern: rapid 4-bump sequence to indicate failure
+    setPatternForState(9);  // Case 9 is abort pattern
+    feedbackState.currentElement = 0;
+    feedbackState.isPlaying = true;
+    feedbackState.isAbortPattern = true;  // Use shorter pauses
+    feedbackState.inPause = false;
+    feedbackState.phaseStartUs = micros();
+    feedbackState.currentOffset = 0.0f;
 }
 
 // ============================================================================

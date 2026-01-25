@@ -1,9 +1,10 @@
 # Autotune V2 Test Results Validation Report
 
-**Version:** 1.0  
+**Version:** 1.2  
 **Created:** January 24, 2026  
+**Updated:** January 25, 2026  
 **Role:** Test Validation Expert Engineer  
-**Status:** 📋 Template Ready - Awaiting First Flight Test Data
+**Status:** 🔄 In Progress - Core Bugs Fixed, Tuning Working
 
 ---
 
@@ -12,30 +13,129 @@
 ### 1.1 What Was Tested
 | Field | Value |
 |-------|-------|
-| Test Date | _[TO BE FILLED]_ |
-| Test Batch IDs | _[TO BE FILLED]_ |
-| Firmware Version | _[TO BE FILLED]_ |
-| Firmware Commit | _[TO BE FILLED]_ |
+| Test Date | January 25, 2026 |
+| Test Batch IDs | phase_1_baseline, phase_2_hover_then_arm_autotune, phase_2_hover_followed_by_throttle_blip_and_flips, phase_2_repeat_1, phase_2_repeat_2 |
+| Firmware Version | 2026.6.0-alpha |
 | Config Target | BETAFPVG473 |
-| Total Runs | _[TO BE FILLED]_ |
+| Total Runs | 5 |
 
 ### 1.2 Overall Outcome
 
 | Category | Status |
 |----------|--------|
-| State Progression | ⏳ Pending |
-| Criteria-Based Exits | ⏳ Pending |
-| Tuning Effectiveness | ⏳ Pending |
-| Cross-Axis Decoupling | ⏳ Pending |
-| Abort/Revert | ⏳ Pending |
+| State Progression | ✅ Working (0→1→2→3→4→5 verified) |
+| Criteria-Based Exits | ✅ Working (overshoot-based P adjustments verified) |
+| Tuning Effectiveness | 🔄 In Progress (Roll axis tuning verified, Pitch pending) |
+| Cross-Axis Decoupling | ⏳ Pending (need multi-axis flight) |
+| Abort/Revert | ✅ Working (switch abort tested) |
 | Persistence Behavior | ⏳ Pending |
-| **Overall** | ⏳ **Awaiting Test Data** |
+| **Overall** | 🟢 **Core Functionality Verified** |
 
-### 1.3 Top Failures
-_None identified yet - awaiting flight test data_
+### 1.3 Top Failures (All Fixed)
 
-### 1.4 Recommended Immediate Next Step
-**Action:** Execute first flight test session using protocol in [VERIFICATION.md](VERIFICATION.md) §5.2
+| Priority | Issue | Root Cause | Status |
+|----------|-------|------------|--------|
+| P0 | THROTTLE_SWEEP never advances | Throttle normalization wrong | ✅ FIXED |
+| P1 | Overshoot calculation wrong (122-194% reported) | Using final setpoint instead of peak setpoint | ✅ FIXED |
+| P2 | Wiggle feedback too subtle | 30°/s amplitude hard to perceive | ✅ FIXED (60°/s) |
+| P2 | Wiggle asymmetric (drone drifts right) | Half-sine bump caused net displacement | ✅ FIXED (symmetric) |
+
+### 1.4 Latest Flight Test Results (phase_2_repeat_2)
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Flight Duration | 63.4s | ✅ |
+| State Progression | IDLE→HOVER_LOCK→THROTTLE_SWEEP→NOISE_CONFIRM→PD_RATIO_SEEK→PD_SCALE_UP | ✅ |
+| Overshoot Range | 2.9% - 9.6% | ✅ In target band |
+| Overshoot Mean | 6.8% | ✅ Centered in 5-10% target |
+| P Gain Changes | 45→42→41→40 | ✅ Converging |
+| Axis Completed | Roll only | 🔄 Need longer flight |
+
+---
+
+## 1.5 Bugs Found & Fixed (January 25, 2026)
+
+### BUG-001: Throttle Normalization Error (CRITICAL)
+
+**Symptom:** State machine stuck in THROTTLE_SWEEP (state 2) indefinitely despite throttle blips.
+
+**Root Cause Analysis:**
+```c
+// WRONG - rcCommand[THROTTLE] is 1000-2000, not 0-1000
+const float throttle = rcCommand[THROTTLE] / 1000.0f;  // Gives 1.0 to 2.0!
+
+// Sweep detection thresholds
+#define SWEEP_HIGH_THROTTLE  0.50f  // Always true when throttle >= 1.0
+#define SWEEP_LOW_THROTTLE   0.30f  // Never true when throttle >= 1.0
+```
+
+**Impact:**
+- `hasSeenHighThrottle` was always immediately true (any throttle value > 0.5)
+- `hasSeenLowThrottle` was never true (stick bottom = 1000/1000 = 1.0 > 0.3)
+- Sweep count never incremented → state never advanced
+
+**Fix Applied:**
+```c
+// CORRECT - subtract 1000 first to get 0-1000 range, then divide
+const float throttle = (rcCommand[THROTTLE] - 1000) / 1000.0f;  // Gives 0.0 to 1.0
+```
+
+**Files Modified:** `autotune_core.c` (8 locations)
+
+### BUG-002: Wiggle Amplitude Too Low
+
+**Symptom:** User reported wiggle feedback hard to see during flight.
+
+**Fix:** Changed `WIGGLE_AMPLITUDE_DPS` from 30.0f to 60.0f in `autotune_feedback.c`
+
+### BUG-003: Overshoot Calculation Error (CRITICAL)
+
+**Symptom:** Overshoot values reported as 122-194% when actual overshoot was ~17-22%.
+
+**Root Cause Analysis:**
+```c
+// WRONG - using final setpoint (near zero after stick release)
+float finalSetpoint = 0.0f;
+for (int i = count - avgCount; i < count; i++) {
+    finalSetpoint += fabsf(setpoint[i]);
+}
+// If peak gyro = 850, final setpoint = 50:
+// overshoot = (850 - 50) / 50 * 100 = 1600% ← WRONG!
+```
+
+**Correct Approach:**
+```c
+// Find peak setpoint (max commanded rate during maneuver)
+float peakSetpoint = 0.0f;
+for (uint16_t i = 0; i < count; i++) {
+    if (fabsf(setpoint[i]) > peakSetpoint) {
+        peakSetpoint = fabsf(setpoint[i]);
+    }
+}
+// If peak gyro = 850, peak setpoint = 800:
+// overshoot = (850 - 800) / 800 * 100 = 6.25% ← CORRECT!
+```
+
+**Files Modified:** `autotune_metrics.c` - `autotuneMetricsComputeOvershoot()`
+
+**Verification:** After fix, overshoot readings are 2.9-9.6% (mean 6.8%), correctly within target band.
+
+### BUG-004: Asymmetric Wiggle Feedback (Drift)
+
+**Symptom:** Drone drifts right during hover when wiggle feedback plays.
+
+**Root Cause:** The BUMP pattern element used a half-sine wave (0 → +peak → 0), which creates net displacement. Over multiple wiggles, this accumulates and causes drift.
+
+**Fix:** Changed all feedback waveforms to symmetric full sine waves:
+```c
+// Before: Half-sine (asymmetric, causes drift)
+feedbackState.currentOffset = sin_approx(phase * M_PIf) * WIGGLE_AMPLITUDE_DPS;
+
+// After: Full sine (symmetric, zero net displacement)
+feedbackState.currentOffset = sin_approx(phase * 2.0f * M_PIf) * WIGGLE_AMPLITUDE_DPS;
+```
+
+**Files Modified:** `autotune_feedback.c` - waveform generation and timing constants
 
 ---
 

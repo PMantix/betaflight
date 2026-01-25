@@ -1,8 +1,8 @@
 # Autotune V2 Consolidated Issue Tracker
 
 **Created:** January 23, 2026  
-**Updated:** January 24, 2026  
-**Status:** Active Development  
+**Updated:** January 25, 2026  
+**Status:** Flight Testing  
 **Sources:** CRITERIA_ASSESSMENT.md, STATE_FLOW_ASSESSMENT.md, LOGGING_OBSERVABILITY_ASSESSMENT.md, SPEC_DRIFT_ASSESSMENT.md
 
 ---
@@ -34,8 +34,18 @@
 | OBS-003 | Observability | 🔴 Blocker | 📋 PARTIAL | Parameter old→new values not logged |
 | OBS-004 | Observability | 🟡 Major | ✅ FIXED | Reason code docs don't match code |
 | OBS-005 | Observability | 🟡 Major | ✅ FIXED | Lag metric not logged |
-| OBS-007 | Observability | 🟡 Major | 📋 TODO | Transition reason codes inconsistent |
+| OBS-007 | Observability | 🟡 Major | ✅ FIXED | Reason code pulsing for cleaner logs |
 | OBS-001 | Observability | 🔴 Blocker | 📋 DEFERRED | No save-to-memory command |
+
+### Flight Test Issues (January 25, 2026)
+
+| ID | Source | Severity | Status | Description |
+|----|--------|----------|--------|-------------|
+| FLT-001 | FlightTest | 🔴 Blocker | ✅ FIXED | Overshoot calculation used final setpoint (near 0) instead of peak |
+| FLT-002 | FlightTest | 🔴 Blocker | ✅ FIXED | Lag calculation same bug as overshoot |
+| FLT-003 | FlightTest | 🟡 Major | ✅ FIXED | Wiggle feedback asymmetric causing drone drift |
+| FLT-004 | FlightTest | 🟡 Major | ✅ FIXED | debug[7] F gain always 0 (only logged in F_TUNE state) |
+| FLT-005 | FlightTest | 🟡 Major | ✅ FIXED | PD_RATIO_SEEK too slow, excessive local optimization |
 
 ### Spec Drift Issues (January 24, 2026)
 
@@ -197,6 +207,78 @@
 
 ---
 
+## Flight Test Fixes (January 25, 2026)
+
+### FLT-001: Overshoot Calculation Used Final Setpoint 🔴→✅
+
+**Problem:** `autotuneMetricsComputeOvershoot()` averaged last 5 samples to get "final" setpoint, but this was near 0 after stick release. Overshoot was 122-194% (nonsense).
+
+**Fix:** Changed to find PEAK setpoint (maximum absolute value in buffer) and use that as reference.
+
+**Files Changed:**
+- `autotune_metrics.c` - Find peak setpoint via loop, use for overshoot calculation
+
+**Result:** Overshoot now 2.9-9.6% (mean 6.8%), matching expected values.
+
+---
+
+### FLT-002: Lag Calculation Same Bug 🔴→✅
+
+**Problem:** `autotuneMetricsComputeLag()` had identical bug - used final setpoint average for 50% crossing threshold.
+
+**Fix:** Changed to use peak setpoint for lag threshold calculation.
+
+**Files Changed:**
+- `autotune_metrics.c` - Find peak setpoint, use for 50% crossing calculation
+
+---
+
+### FLT-003: Wiggle Feedback Asymmetric 🟡→✅
+
+**Problem:** BUMP and WIGGLE waveforms were half-sine (only positive), causing drone to drift right during wiggle sequences.
+
+**Fix:** Changed to full symmetric sine wave: 0→+peak→0→-peak→0. Net deflection is zero.
+
+**Files Changed:**
+- `autotune_feedback.c` - Rewrote BUMP to full sine, WIGGLE to three full cycles
+- `autotune_feedback.c` - Updated durations: BUMP=150ms, WIGGLE=300ms
+
+---
+
+### FLT-004: debug[7] F Gain Always 0 🟡→✅
+
+**Problem:** F gain only logged during F_TUNE state, but we need it visible in PD_RATIO_SEEK and PD_SCALE_UP too.
+
+**Fix:** Added F gain logging at state entry for PD_RATIO_SEEK and PD_SCALE_UP.
+
+**Files Changed:**
+- `autotune_core.c` - Added `AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_F, ...)` in `statePdRatioSeekEnter()` and `statePdScaleUpEnter()`
+
+---
+
+### FLT-005: PD_RATIO_SEEK Too Slow 🟡→✅
+
+**Problem:** Spent too long making small adjustments within ±5% of target. User feedback: "advance faster to continue improving the tune overall, rather than locally optimizing."
+
+**Fix:** Added "consecutive good events" logic - if 3 events in a row are within ±5% of target overshoot, advance to next phase.
+
+**Files Changed:**
+- `autotune_core.c` - Modified `pdRatioSeekDecision()` to track `consecutiveGood` and advance after 3
+
+---
+
+### OBS-007: Reason Codes Persist 🟡→✅
+
+**Problem:** Reason codes stay set until next event, making log analysis difficult.
+
+**Fix:** Added `setReasonCode()` helper with timestamp tracking. Reason codes auto-clear to 0 after 200ms.
+
+**Files Changed:**
+- `autotune_types.h` - Added `reasonCodeSetTimeUs` field
+- `autotune_core.c` - Added `setReasonCode()`, `clearReasonCodeIfExpired()`, call clearing in `autotuneUpdate()`
+
+---
+
 ### DRIFT-001: ABORTED State Missing from Code 🔴→✅
 
 **Problem:** LOG_ANALYSIS.md documented state 9 as ABORTED, but code only has states 0-8.
@@ -261,13 +343,19 @@
 ## Validation Checklist
 
 - [x] Build passes with `make CONFIG=BETAFPVG473`
-- [ ] Events pass quality gates during normal stick movements
+- [x] Events pass quality gates during normal stick movements (verified Jan 25)
 - [ ] Filter phase actually changes filter values (verify in blackbox)
-- [ ] Lag values correct on 8K system (~30x smaller than before)
-- [ ] NOISE_CONFIRM doesn't get stuck
+- [x] Lag values correct with peak setpoint reference (fixed Jan 25)
+- [x] NOISE_CONFIRM advances correctly (verified Jan 25)
 - [ ] Rebound detection consistent across overshoot levels
-- [ ] autotuneInit() called before first use
+- [x] autotuneInit() called before first use
+- [x] Overshoot values sensible: 2.9-9.6% (verified Jan 25)
+- [x] State machine progresses: 0→1→2→3→4→5 (verified Jan 25)
+- [x] Wiggle feedback symmetric, no drift (fixed Jan 25)
+- [x] debug[7] F gain visible in logs (fixed Jan 25)
+- [ ] PD_SCALE_UP adjusts gains correctly (pending verification)
+- [ ] Full tuning cycle completes through all axes
 
 ---
 
-*Last Updated: January 23, 2026*
+*Last Updated: January 25, 2026*

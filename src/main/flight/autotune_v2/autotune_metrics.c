@@ -95,29 +95,37 @@ float autotuneMetricsComputeOvershoot(const float *gyro, const float *setpoint, 
         return 0.0f;
     }
     
-    // Find peak gyro value
-    int peakIdx = autotuneMetricsFindFirstPeak(gyro, count);
-    if (peakIdx < 0) {
+    // Find peak setpoint (the maximum commanded rate during the maneuver)
+    // This is the reference for overshoot calculation
+    float peakSetpoint = 0.0f;
+    int peakSetpointIdx = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        float absSetpoint = fabsf(setpoint[i]);
+        if (absSetpoint > peakSetpoint) {
+            peakSetpoint = absSetpoint;
+            peakSetpointIdx = i;
+        }
+    }
+    
+    if (peakSetpoint < 50.0f) {  // Minimum 50 deg/s to be a valid maneuver
         return 0.0f;
     }
     
-    const float peakGyro = fabsf(gyro[peakIdx]);
-    
-    // Find final setpoint (average of last few samples)
-    float finalSetpoint = 0.0f;
-    const int avgCount = count > 10 ? 5 : count / 2;
-    for (int i = count - avgCount; i < count; i++) {
-        finalSetpoint += fabsf(setpoint[i]);
-    }
-    finalSetpoint /= avgCount;
-    
-    if (finalSetpoint < 0.001f) {
-        return 0.0f;
+    // Find peak gyro value AFTER the setpoint peak (overshoot occurs after command)
+    // Search from setpoint peak to end of buffer
+    float peakGyro = 0.0f;
+    for (uint16_t i = peakSetpointIdx; i < count; i++) {
+        float absGyro = fabsf(gyro[i]);
+        if (absGyro > peakGyro) {
+            peakGyro = absGyro;
+        }
     }
     
-    // Overshoot = (peak - final) / final * 100
-    const float overshoot = (peakGyro - finalSetpoint) / finalSetpoint * 100.0f;
-    return overshoot > 0 ? overshoot : 0.0f;
+    // Overshoot = (peakGyro - peakSetpoint) / peakSetpoint * 100
+    // If gyro exceeds setpoint, we have overshoot
+    // If gyro is less than setpoint, overshoot is 0 (or negative = undershoot)
+    const float overshoot = (peakGyro - peakSetpoint) / peakSetpoint * 100.0f;
+    return overshoot > 0.0f ? overshoot : 0.0f;
 }
 
 bool autotuneMetricsOvershootInBand(float overshootPct, float targetLow, float targetHigh)
@@ -256,24 +264,27 @@ float autotuneMetricsComputeLag(const float *gyro, const float *setpoint,
         return 0.0f;
     }
     
-    // Find final setpoint (average of last 5 samples)
-    float finalSetpoint = 0.0f;
-    const int avgCount = 5;
-    for (int i = count - avgCount; i < count; i++) {
-        finalSetpoint += setpoint[i];
-    }
-    finalSetpoint /= avgCount;
-    
-    if (fabsf(finalSetpoint) < 0.001f) {
-        return 0.0f;  // No significant target
+    // Find PEAK setpoint (the maximum commanded rate during the maneuver)
+    // This is the reference for lag calculation - same fix as overshoot
+    float peakSetpoint = 0.0f;
+    for (uint16_t i = 0; i < count; i++) {
+        float absSetpoint = fabsf(setpoint[i]);
+        if (absSetpoint > fabsf(peakSetpoint)) {
+            peakSetpoint = setpoint[i];  // Keep sign for direction
+        }
     }
     
-    // Find when gyro first reaches 50% of final setpoint
-    const float halfTarget = finalSetpoint * 0.5f;
+    if (fabsf(peakSetpoint) < 50.0f) {
+        return 0.0f;  // Minimum 50 deg/s to be valid
+    }
+    
+    // Find when gyro first reaches 50% of PEAK setpoint
+    // Search from start of buffer (before the peak)
+    const float halfTarget = peakSetpoint * 0.5f;
     int crossingIdx = -1;
     
     // Handle both positive and negative targets
-    if (finalSetpoint > 0) {
+    if (peakSetpoint > 0) {
         for (int i = 0; i < count; i++) {
             if (gyro[i] >= halfTarget) {
                 crossingIdx = i;

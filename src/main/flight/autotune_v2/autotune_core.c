@@ -96,6 +96,27 @@ static void advanceToNextAxisOrComplete(timeUs_t currentTimeUs);
 static void checkTimeouts(timeUs_t currentTimeUs);
 
 // ============================================================================
+// Reason Code Helper - pulses reason code briefly for debug logging
+// ============================================================================
+
+#define REASON_CODE_PULSE_DURATION_US  200000  // 200ms pulse duration
+
+static void setReasonCode(uint16_t reason, timeUs_t currentTimeUs)
+{
+    runtime.reasonCode = reason;
+    runtime.reasonCodeSetTimeUs = currentTimeUs;
+}
+
+static void clearReasonCodeIfExpired(timeUs_t currentTimeUs)
+{
+    // Clear reason code after pulse duration (except NONE which is already clear)
+    if (runtime.reasonCode != AUTOTUNE_REASON_NONE &&
+        cmpTimeUs(currentTimeUs, runtime.reasonCodeSetTimeUs) > REASON_CODE_PULSE_DURATION_US) {
+        runtime.reasonCode = AUTOTUNE_REASON_NONE;
+    }
+}
+
+// ============================================================================
 // State Transition
 // ============================================================================
 
@@ -185,7 +206,8 @@ static void stateHoverLockEnter(timeUs_t currentTimeUs)
     runtime.reasonCode = AUTOTUNE_REASON_NONE;
     
     // Initialize throttle tracking (normalize to 0-1 range)
-    runtime.lastThrottle = rcCommand[THROTTLE] / 1000.0f;
+    // rcCommand[THROTTLE] is 1000-2000, so subtract 1000 first
+    runtime.lastThrottle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     // Initialize filter characterization
     autotuneFilterReset();
@@ -193,8 +215,8 @@ static void stateHoverLockEnter(timeUs_t currentTimeUs)
 
 static void stateHoverLockUpdate(timeUs_t currentTimeUs)
 {
-    // Get current throttle as float 0-1
-    const float currentThrottle = rcCommand[THROTTLE] / 1000.0f;
+    // Get current throttle as float 0-1 (rcCommand[THROTTLE] is 1000-2000)
+    const float currentThrottle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     // Check sticks centered (roll, pitch, yaw < 5% deflection)
     // rcCommand for sticks is ±500, so 5% = 25
@@ -239,14 +261,14 @@ static void stateThrottleSweepEnter(timeUs_t currentTimeUs)
     UNUSED(currentTimeUs);
     runtime.reasonCode = AUTOTUNE_REASON_NONE;
     
-    // Initialize throttle tracking for sweep
-    runtime.lastThrottle = rcCommand[THROTTLE] / 1000.0f;
+    // Initialize throttle tracking for sweep (rcCommand[THROTTLE] is 1000-2000)
+    runtime.lastThrottle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
 }
 
 static void stateThrottleSweepUpdate(timeUs_t currentTimeUs)
 {
-    // Get current throttle as float 0-1
-    const float currentThrottle = rcCommand[THROTTLE] / 1000.0f;
+    // Get current throttle as float 0-1 (rcCommand[THROTTLE] is 1000-2000)
+    const float currentThrottle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     // Update filter characterization with current throttle and noise
     // noiseLevel parameter is ignored - filter module measures directly from gyro
@@ -447,12 +469,33 @@ static autotuneDecision_e pdRatioSeekDecision(
     }
     
     // === CHECK CONVERGENCE ===
-    const float tolerance = 2.0f;  // +/-2% is close enough
-    if (fabsf(overshoot - targetOvershoot) < tolerance) {
+    // Multiple ways to advance to next phase:
+    // 1. Overshoot is within tight tolerance of target
+    // 2. We have 3+ consecutive good events (overshoot in acceptable range)
+    // 3. We have both bracket bounds and they're close together
+    
+    const float tightTolerance = 2.0f;   // +/-2% is ideal
+    const float looseTolerance = 5.0f;   // +/-5% is acceptable for advancement
+    const uint8_t requiredGoodEvents = 3;
+    
+    // Track if this is a "good enough" result
+    bool isGoodEnough = fabsf(overshoot - targetOvershoot) < looseTolerance;
+    
+    if (isGoodEnough) {
         autotuneRollbackReportGood(&axisState->pState);
         trackGoodEvent(axisState);
-        *newP = currentP;
-        return AUTOTUNE_DECISION_ADVANCE;
+        
+        // Advance if within tight tolerance
+        if (fabsf(overshoot - targetOvershoot) < tightTolerance) {
+            *newP = currentP;
+            return AUTOTUNE_DECISION_ADVANCE;
+        }
+        
+        // Advance if we've had enough consecutive good events
+        if (axisState->pState.consecutiveGood >= requiredGoodEvents) {
+            *newP = currentP;
+            return AUTOTUNE_DECISION_ADVANCE;
+        }
     }
     
     // === PHASE 1: BRACKETING (still missing a bound) ===
@@ -555,9 +598,10 @@ static void statePdRatioSeekEnter(timeUs_t currentTimeUs)
     // Reset event detector for this axis
     autotuneEventReset();
     
-    // Debug output
+    // Debug output - log all three gain values
     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_P, axis->originalP);
     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_D, axis->originalD);
+    AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_F, axis->originalF);
 }
 
 static void statePdRatioSeekUpdate(timeUs_t currentTimeUs)
@@ -576,8 +620,8 @@ static void statePdRatioSeekUpdate(timeUs_t currentTimeUs)
         }
     }
     
-    // Throttle normalized 0.0 to 1.0 (rcCommand[THROTTLE] is 0-1000)
-    const float throttle = rcCommand[THROTTLE] / 1000.0f;
+    // Throttle normalized 0.0 to 1.0 (rcCommand[THROTTLE] is 1000-2000)
+    const float throttle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     switch (axis->substate) {
         case AXIS_SUBSTATE_WAIT_EVENT:
@@ -624,13 +668,13 @@ static void statePdRatioSeekUpdate(timeUs_t currentTimeUs)
                     // Event rejected by quality gates - log reason and wait for next
                     // Determine which gate failed for debug output
                     if (!autotuneEventCheckDeflection(eventData->stickDeflection)) {
-                        runtime.reasonCode = AUTOTUNE_REASON_INSUFFICIENT_DEFLECTION;
+                        setReasonCode(AUTOTUNE_REASON_INSUFFICIENT_DEFLECTION, currentTimeUs);
                     } else if (!autotuneEventCheckCrossAxis(eventData->crossAxisMovement)) {
-                        runtime.reasonCode = AUTOTUNE_REASON_CROSS_AXIS_CONTAMINATION;
+                        setReasonCode(AUTOTUNE_REASON_CROSS_AXIS_CONTAMINATION, currentTimeUs);
                     } else if (!autotuneEventCheckThrottle(eventData->throttle)) {
-                        runtime.reasonCode = AUTOTUNE_REASON_THROTTLE_OUT_OF_BAND;
+                        setReasonCode(AUTOTUNE_REASON_THROTTLE_OUT_OF_BAND, currentTimeUs);
                     } else {
-                        runtime.reasonCode = AUTOTUNE_REASON_ABNORMAL_DURATION;
+                        setReasonCode(AUTOTUNE_REASON_ABNORMAL_DURATION, currentTimeUs);
                     }
                     
                     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_REASON, runtime.reasonCode);
@@ -650,7 +694,7 @@ static void statePdRatioSeekUpdate(timeUs_t currentTimeUs)
                     axis->lastMetrics = metrics;
                     axis->eventCount++;
                     runtime.totalEventsProcessed++;
-                    runtime.reasonCode = AUTOTUNE_REASON_EVENT_DETECTED;
+                    setReasonCode(AUTOTUNE_REASON_EVENT_DETECTED, currentTimeUs);
                     runtime.lastEventTimeUs = currentTimeUs;
                     
                     // Debug output - overshoot scaled by 10 for integer display
@@ -675,7 +719,7 @@ static void statePdRatioSeekUpdate(timeUs_t currentTimeUs)
                         AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_P, (int16_t)axis->pState.currentValue);
                     } else if (decision == AUTOTUNE_DECISION_ADVANCE) {
                         // Target reached - transition to PD_SCALE_UP
-                        runtime.reasonCode = AUTOTUNE_REASON_TARGET_REACHED;
+                        setReasonCode(AUTOTUNE_REASON_TARGET_REACHED, currentTimeUs);
                         transitionToState(AUTOTUNE_STATE_PD_SCALE_UP, currentTimeUs);
                         return;
                     }
@@ -683,14 +727,14 @@ static void statePdRatioSeekUpdate(timeUs_t currentTimeUs)
                     
                     // Check if we've hit event limit for this axis
                     if (axis->eventCount >= AUTOTUNE_MAX_EVENTS_PER_AXIS) {
-                        runtime.reasonCode = AUTOTUNE_REASON_EVENT_LIMIT;
+                        setReasonCode(AUTOTUNE_REASON_EVENT_LIMIT, currentTimeUs);
                         // Exceeded event limit - advance anyway
                         transitionToState(AUTOTUNE_STATE_PD_SCALE_UP, currentTimeUs);
                         return;
                     }
                 } else {
                     // Metrics computation failed
-                    runtime.reasonCode = AUTOTUNE_REASON_INVALID_METRICS;
+                    setReasonCode(AUTOTUNE_REASON_INVALID_METRICS, currentTimeUs);
                     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_REASON, runtime.reasonCode);
                 }
                 
@@ -908,9 +952,10 @@ static void statePdScaleUpEnter(timeUs_t currentTimeUs)
     axis->substate = AXIS_SUBSTATE_WAIT_EVENT;
     axis->eventCount = 0;
     
-    // Debug output
+    // Debug output - log all three gain values (F not being tuned yet, but show current)
     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_P, (int16_t)axis->ratioSeekP);
     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_D, (int16_t)axis->ratioSeekD);
+    AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_GAIN_F, currentPidProfile->pid[runtime.currentAxisIndex].F);
 }
 
 static void statePdScaleUpUpdate(timeUs_t currentTimeUs)
@@ -928,8 +973,8 @@ static void statePdScaleUpUpdate(timeUs_t currentTimeUs)
         }
     }
     
-    // Throttle normalized 0.0 to 1.0
-    const float throttle = rcCommand[THROTTLE] / 1000.0f;
+    // Throttle normalized 0.0 to 1.0 (rcCommand[THROTTLE] is 1000-2000)
+    const float throttle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     switch (axis->substate) {
         case AXIS_SUBSTATE_WAIT_EVENT:
@@ -1223,7 +1268,8 @@ static void stateFTuneUpdate(timeUs_t currentTimeUs)
         }
     }
     
-    const float throttle = rcCommand[THROTTLE] / 1000.0f;
+    // Throttle normalized 0.0 to 1.0 (rcCommand[THROTTLE] is 1000-2000)
+    const float throttle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     switch (axis->substate) {
         case AXIS_SUBSTATE_WAIT_EVENT:
@@ -1390,7 +1436,8 @@ static void statePdRetuneUpdate(timeUs_t currentTimeUs)
         }
     }
     
-    const float throttle = rcCommand[THROTTLE] / 1000.0f;
+    // Throttle normalized 0.0 to 1.0 (rcCommand[THROTTLE] is 1000-2000)
+    const float throttle = (rcCommand[THROTTLE] - 1000) / 1000.0f;
     
     switch (axis->substate) {
         case AXIS_SUBSTATE_WAIT_EVENT:
@@ -1684,6 +1731,9 @@ void autotuneUpdate(timeUs_t currentTimeUs)
     // Update sub-modules
     autotuneFeedbackUpdate(currentTimeUs);
     
+    // Clear reason code after pulse duration for cleaner debug logging
+    clearReasonCodeIfExpired(currentTimeUs);
+    
     // Check for timeouts when active
     if (runtime.masterState != AUTOTUNE_STATE_IDLE && 
         runtime.masterState != AUTOTUNE_STATE_COMPLETE) {
@@ -1805,6 +1855,9 @@ void autotuneAbort(uint16_t reasonCode)
             }
         }
     }
+    
+    // Play abort feedback pattern (rapid bumps) to notify pilot
+    autotuneFeedbackAbort();
     
     // Log restored values for observability
     AUTOTUNE_DEBUG_SET(AUTOTUNE_DEBUG_REASON, reasonCode);

@@ -301,5 +301,6 @@ typedef struct {
 
     // Debug/telemetry
     uint16_t reasonCode;                // Last reason code for debug
+    timeUs_t reasonCodeSetTimeUs;       // When reason code was last set (for pulse clearing)
     autotuneDecision_e lastDecision;    // Last decision made
 } autotuneRuntime_t;
