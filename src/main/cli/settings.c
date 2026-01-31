@@ -59,6 +59,7 @@
 #include "flight/failsafe.h"
 #include "flight/gps_rescue.h"
 #include "flight/imu.h"
+#include "flight/mbff.h"
 #include "flight/mixer.h"
 #include "flight/pid.h"
 #include "flight/position.h"
@@ -2061,6 +2062,20 @@ const clivalue_t valueTable[] = {
     { "gimbal_yaw_limit",          VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { -100, 100 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_yaw_limit) },
     { "gimbal_stabilisation",      VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 7 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_stabilisation) },
     { "gimbal_sensitivity",        VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { -16, 15 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_sensitivity) },
+#endif
+
+// PG_MBFF_CONFIG
+#ifdef USE_MBFF
+    { "mbff_enable",               VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, enabled) },
+    { "mbff_ts",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 5, 50 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ts) },
+    { "mbff_tp",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 100 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, tp) },
+    { "mbff_ka",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ka) },
+    { "mbff_kr",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, kr) },
+    { "mbff_b0",                   VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 500 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, b0) },
+    { "mbff_b1",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, b1) },
+    { "mbff_ff_limit",             VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 100 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ff_limit) },
+    { "mbff_gain",                 VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 2000 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, gain) },
+    { "mbff_preview_threshold",    VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, preview_threshold) },
 #endif
 };
 

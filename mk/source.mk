@@ -164,6 +164,7 @@ COMMON_SRC = \
             flight/gps_rescue_multirotor.c \
             flight/gps_rescue_wing.c \
             flight/imu.c \
+            flight/mbff.c \
             flight/mixer.c \
             flight/mixer_init.c \
             flight/mixer_tricopter.c \

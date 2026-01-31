@@ -48,6 +48,7 @@
 #include "flight/autopilot.h"
 #include "flight/gps_rescue.h"
 #include "flight/imu.h"
+#include "flight/mbff.h"
 #include "flight/mixer.h"
 #include "flight/rpm_filter.h"
 
@@ -321,6 +322,9 @@ void pidResetIterm(void)
         axisError[axis] = 0.0f;
 #endif
     }
+#ifdef USE_MBFF
+    mbffReset();
+#endif
 }
 
 #ifdef USE_WING
@@ -1203,6 +1207,10 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
     rpmFilterUpdate();
 #endif
 
+#ifdef USE_MBFF
+    mbffUpdateRpm();
+#endif
+
     if (pidRuntime.useEzDisarm) {
         disarmOnImpact();
     }
@@ -1460,9 +1468,22 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         pidSetpointDelta += setpointCorrection - pidRuntime.oldSetpointCorrection[axis];
         pidRuntime.oldSetpointCorrection[axis] = setpointCorrection;
 #endif
-        // no feedforward in launch control
-        const float feedforwardGain = launchControlActive ? 0.0f : pidRuntime.pidCoefficient[axis].Kf;
-        pidData[axis].F = feedforwardGain * pidSetpointDelta;
+
+#ifdef USE_MBFF
+        // Model-Based Feedforward (replaces classic FF when enabled)
+        if (mbffIsEnabled() && !launchControlActive) {
+            pidData[axis].F = mbffUpdate(axis, currentPidSetpoint, gyroRate, pidRuntime.dT);
+            // Log classic FF for comparison in debug mode
+            if (axis == gyro.gyroDebugAxis && debugMode == DEBUG_MBFF) {
+                DEBUG_SET(DEBUG_MBFF, 4, lrintf(pidRuntime.pidCoefficient[axis].Kf * pidSetpointDelta * 100.0f));
+            }
+        } else
+#endif
+        {
+            // Classic feedforward: no feedforward in launch control
+            const float feedforwardGain = launchControlActive ? 0.0f : pidRuntime.pidCoefficient[axis].Kf;
+            pidData[axis].F = feedforwardGain * pidSetpointDelta;
+        }
 
 #ifdef USE_YAW_SPIN_RECOVERY
         if (yawSpinActive) {
