@@ -326,18 +326,18 @@ FAST_CODE float mbffUpdate(int axis, float setpoint, float setpointDelta, float 
     // We want to produce a command that creates the desired setpoint change
     // For FF: we want to anticipate the gyro response to setpoint delta
     
-    // Simple approach: scale setpoint delta by E and eRPM sensitivity
-    // When eRPM²_diff is large, less command is needed (high thrust = high response)
-    // When eRPM²_diff is small, more command is needed (low thrust = low response)
+    // Model-based feedforward:
+    // Model: gyroDelta = E × eRPM²_diff  (learned relationship)
+    // Inverse: To get desired gyroDelta, need motorEffort ∝ gyroDelta / E
+    // FF = ff_scale × setpointDelta / E
+    // When E is high (effective motors), less FF needed
+    // When E is low (weak motors), more FF needed
     
-    // For now, use a direct scaling approach:
-    // FF = ff_scale × setpointDelta
-    // This is similar to classic FF but will be refined based on learned E
+    // Clamp E to prevent division by very small values
+    const float E_min = 0.001f;  // Minimum E to prevent excessive FF
+    const float E_clamped = fmaxf(E, E_min);
     
-    float ff_output = mbffRuntime.ff_scale * setpointDelta;
-    
-    // TODO: Once E is learned reliably, use model-based prediction:
-    // ff_output = setpointDelta / (E × sensitivity_factor);
+    float ff_output = mbffRuntime.ff_scale * setpointDelta / E_clamped;
     
     // Apply limit as percentage of pidSumLimit
     const float limit = mbffRuntime.ff_limit * mbffRuntime.pidSumLimit;
