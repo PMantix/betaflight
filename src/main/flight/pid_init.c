@@ -453,6 +453,7 @@ void pidInitConfig(const pidProfile_t *pidProfile)
     throttleBoost = pidProfile->throttle_boost * 0.1f;
 #endif
     pidRuntime.itermRotation = pidProfile->iterm_rotation;
+    pidRuntime.dtermMode = pidProfile->dterm_mode;
 
     // Calculate the anti-gravity value that will trigger the OSD display when its strength exceeds 25% of max.
     // This gives a useful indication of AG activity without excessive display.

@@ -637,6 +637,10 @@ const char* const lookupTableYawType[] = {
 };
 #endif // USE_WING
 
+static const char* const lookupTableDtermMode[] = {
+    "GYRO", "ERROR",
+};
+
 #define LOOKUP_TABLE_ENTRY(name) { name, ARRAYLEN(name) }
 
 const lookupTableEntry_t lookupTables[] = {
@@ -770,6 +774,7 @@ const lookupTableEntry_t lookupTables[] = {
     LOOKUP_TABLE_ENTRY(lookupTableTpaSpeedType),
     LOOKUP_TABLE_ENTRY(lookupTableYawType),
 #endif // USE_WING
+    LOOKUP_TABLE_ENTRY(lookupTableDtermMode),
 };
 
 #undef LOOKUP_TABLE_ENTRY
@@ -1259,6 +1264,7 @@ const clivalue_t valueTable[] = {
     { PARAM_NAME_DTERM_LPF2_STATIC_HZ,  VAR_INT16  | PROFILE_VALUE, .config.minmax = { 0, LPF_MAX_HZ }, PG_PID_PROFILE, offsetof(pidProfile_t, dterm_lpf2_static_hz) },
     { PARAM_NAME_DTERM_NOTCH_HZ,        VAR_UINT16 | PROFILE_VALUE, .config.minmaxUnsigned = { 0, LPF_MAX_HZ }, PG_PID_PROFILE, offsetof(pidProfile_t, dterm_notch_hz) },
     { PARAM_NAME_DTERM_NOTCH_CUTOFF,    VAR_UINT16 | PROFILE_VALUE, .config.minmaxUnsigned = { 0, LPF_MAX_HZ }, PG_PID_PROFILE, offsetof(pidProfile_t, dterm_notch_cutoff) },
+    { "dterm_mode",                     VAR_UINT8  | PROFILE_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_DTERM_MODE }, PG_PID_PROFILE, offsetof(pidProfile_t, dterm_mode) },
 #if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
     { PARAM_NAME_VBAT_SAG_COMPENSATION, VAR_UINT8  | PROFILE_VALUE, .config.minmaxUnsigned = { 0, 150 }, PG_PID_PROFILE, offsetof(pidProfile_t, vbat_sag_compensation) },
 #endif
@@ -2067,15 +2073,18 @@ const clivalue_t valueTable[] = {
 // PG_MBFF_CONFIG
 #ifdef USE_MBFF
     { "mbff_enable",               VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, enabled) },
-    { "mbff_ts",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 5, 50 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ts) },
-    { "mbff_tp",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 100 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, tp) },
-    { "mbff_ka",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ka) },
-    { "mbff_kr",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, kr) },
-    { "mbff_b0",                   VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 500 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, b0) },
-    { "mbff_b1",                   VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, b1) },
+    // eRPM² effectiveness per axis (scaled x10000, so 60 = 0.006)
+    { "mbff_e_rpm2_roll",          VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, e_rpm2_roll) },
+    { "mbff_e_rpm2_pitch",         VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, e_rpm2_pitch) },
+    { "mbff_e_rpm2_yaw",           VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, e_rpm2_yaw) },
+    // Output scaling
+    { "mbff_ff_scale",             VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 1, 100 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ff_scale) },
     { "mbff_ff_limit",             VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 100 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, ff_limit) },
-    { "mbff_gain",                 VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 10, 2000 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, gain) },
-    { "mbff_preview_threshold",    VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 200 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, preview_threshold) },
+    // Online learning parameters (RLS-based)
+    { "mbff_learn_enable",         VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, learn_enable) },
+    { "mbff_learn_lambda",         VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 990, 999 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, learn_lambda) },
+    { "mbff_setpoint_thresh",      VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 100, 800 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, setpoint_thresh) },
+    { "mbff_gyro_delta_thresh",    VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 1, 50 }, PG_MBFF_CONFIG, offsetof(mbffConfig_t, gyro_delta_thresh) },
 #endif
 };
 

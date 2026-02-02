@@ -130,6 +130,7 @@ typedef enum {
     DEBUG_FLASH_TEST_PRBS,
     DEBUG_MAVLINK_TELEMETRY,
     DEBUG_MBFF,
+    DEBUG_MBFF_LEARN,
     DEBUG_COUNT
 } debugType_e;
 

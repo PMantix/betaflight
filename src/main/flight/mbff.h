@@ -27,12 +27,15 @@
 #include "pg/pg.h"
 
 /*
- * Model-Based Feedforward (MBFF)
+ * Model-Based Feedforward (MBFF) v2
  *
- * Replaces classic feedforward (F) with a trajectory- and model-based approach:
- * 1. Reference trajectory smoothly tracks pilot intent
- * 2. Desired acceleration computed from trajectory + preview correction
- * 3. Torque effectiveness model scales output based on RPM
+ * Physics-based feedforward using eRPM² differential model:
+ *   delta(gyro) ~ E_rpm² × eRPM²_diff
+ *
+ * Key relationships (validated R² = 0.89-0.99):
+ *   Roll:  eRPM²_diff = (eRPM[0]² + eRPM[1]²) - (eRPM[2]² + eRPM[3]²)
+ *   Pitch: eRPM²_diff = (eRPM[0]² + eRPM[2]²) - (eRPM[1]² + eRPM[3]²)
+ *   Yaw:   eRPM²_diff = (eRPM[0]² + eRPM[3]²) - (eRPM[1]² + eRPM[2]²)
  *
  * See docs/mbff/PRD.md for detailed design rationale.
  */
@@ -47,16 +50,25 @@
 // ---------------------------------------------------------------------------
 
 typedef struct mbffConfig_s {
-    uint8_t  enabled;           // 0 = off, 1 = on
-    uint8_t  ts;                // Trajectory time constant [ms], range 5-50
-    uint8_t  tp;                // Preview horizon [ms], range 10-100
-    uint8_t  ka;                // Trajectory accel gain [x100], 0-200
-    uint8_t  kr;                // Preview/tracking correction gain [x100], 0-200
-    uint16_t b0;                // Base torque effectiveness [x100], 10-500
-    uint8_t  b1;                // RPM-based effectiveness [x100], 0-200
-    uint8_t  ff_limit;          // FF limit as % of pidSumLimit, 10-100
-    uint16_t gain;              // Master output gain [x10], 10-2000 (1.0 to 200.0)
-    uint8_t  preview_threshold; // Setpoint threshold for preview term [deg/s], 0-200
+    uint8_t  enabled;               // 0 = off, 1 = on
+    
+    // eRPM² effectiveness per axis [scaled: value/10000]
+    // These represent angular acceleration per unit eRPM²_diff: deg/s² per eRPM²_diff
+    // E ≈ 0.006 for roll, 0.003 for pitch (validated via blackbox analysis)
+    uint16_t e_rpm2_roll;           // Roll effectiveness [x10000], range 10-200 (0.001-0.02)
+    uint16_t e_rpm2_pitch;          // Pitch effectiveness [x10000], range 10-200 (0.001-0.02)
+    uint16_t e_rpm2_yaw;            // Yaw effectiveness [x10000], range 10-200 (0.001-0.02)
+    
+    // Output scaling
+    uint8_t  ff_scale;              // FF output scale [x100], range 1-100 (0.01-1.0)
+    uint8_t  ff_limit;              // FF limit as % of pidSumLimit, 10-100
+    
+    // Online learning config (RLS-based)
+    uint8_t  learn_enable;          // 0 = off, 1 = on (learning of E_rpm²)
+    uint16_t learn_lambda;          // RLS forgetting factor [x1000], 990-999 (0.99-0.999)
+    uint16_t setpoint_thresh;       // Setpoint threshold for learning [deg/s], 100-800
+    // TODO: gyro_delta_thresh assumes 4kHz PID. Should scale with pidFrequency.
+    uint8_t  gyro_delta_thresh;     // Per-PID-loop gyro delta threshold, 1-50
 } mbffConfig_t;
 
 PG_DECLARE(mbffConfig_t, mbffConfig);
@@ -66,33 +78,60 @@ PG_DECLARE(mbffConfig_t, mbffConfig);
 // ---------------------------------------------------------------------------
 
 typedef struct mbffAxisState_s {
-    float omega_ref;            // Reference rate [deg/s]
-    float prev_omega_ref;       // Previous reference rate (for debug)
-    float prev_setpoint;        // Previous setpoint for derivative calculation
+    float prev_gyro;            // Previous gyro rate for delta(gyro) calculation
+    float prev_setpoint;        // Previous setpoint for delta calculation
+    
+    // RLS learner state (zero-intercept: y = E × x)
+    float E;                    // Learned eRPM² effectiveness
+    float P;                    // RLS covariance (scalar for 1-parameter model)
+    uint32_t learn_count;       // Number of samples used for learning
+    bool confident;             // Has enough samples to use learned value
 } mbffAxisState_t;
+
+// ---------------------------------------------------------------------------
+// Online learner gating
+// ---------------------------------------------------------------------------
+
+// Gate reason flags
+#define MBFF_GATE_NONE              0
+#define MBFF_GATE_DISABLED          (1 << 0)
+#define MBFF_GATE_NO_RPM            (1 << 1)
+#define MBFF_GATE_LOW_SETPOINT      (1 << 2)
+#define MBFF_GATE_LOW_GYRO_DELTA    (1 << 3)
+#define MBFF_GATE_TUMBLE            (1 << 4)
+#define MBFF_GATE_SATURATED         (1 << 5)
+
+// Minimum samples before using learned E value
+#define MBFF_LEARN_MIN_SAMPLES      20
+
+// Initial RLS covariance (large = fast initial learning)
+#define MBFF_RLS_P_INIT             1000.0f
 
 typedef struct mbffRuntime_s {
     // Per-axis state
     mbffAxisState_t axis[XYZ_AXIS_COUNT];
 
     // Cached config values (converted to float at init)
-    float ts_sec;               // Trajectory time constant [s]
-    float tp_sec;               // Preview horizon [s]
-    float ka;                   // Trajectory acceleration gain
-    float kr;                   // Preview correction gain
-    float b0;                   // Base effectiveness
-    float b1;                   // RPM effectiveness coefficient
+    float E_rpm2[XYZ_AXIS_COUNT];   // eRPM² effectiveness per axis
+    float ff_scale;             // FF output scale
     float ff_limit;             // Max FF output
-    float gain;                 // Master output gain
-    float preview_threshold;    // Setpoint threshold for preview gating [deg/s]
-
+    float lambda;               // RLS forgetting factor
+    float setpoint_thresh;      // Setpoint threshold for learning
+    float gyro_delta_thresh;    // Gyro delta threshold for learning
+    
     // Runtime data
-    float avg_rpm_sq;           // Average motor RPM squared
-    float effectiveness;        // Current torque effectiveness g(RPM²)
+    float eRPM[4];              // Current motor eRPM values
+    float eRPM_sq_diff[XYZ_AXIS_COUNT];  // Current eRPM² differential per axis
     float dT;                   // Loop time [s]
     float pidFrequency;         // PID loop frequency [Hz]
+    float pidSumLimit;          // PID sum limit for FF limiting
+    
+    // Gating state
+    bool gated;                 // True if learning is currently gated
+    uint8_t gate_reason;        // Reason for gating (for debug)
 
     bool enabled;               // Runtime enable flag
+    bool learn_enabled;         // Learning enable flag
 } mbffRuntime_t;
 
 extern mbffRuntime_t mbffRuntime;
@@ -109,43 +148,69 @@ void mbffInit(void);
 
 /**
  * Reset MBFF state (e.g., on arm/disarm).
- * Clears reference trajectory to current setpoint.
+ * Resets learning state but keeps learned E values.
  */
 void mbffReset(void);
 
 /**
- * Update MBFF for a single axis.
+ * Compute feedforward for a single axis.
  *
  * @param axis          Axis index (FD_ROLL, FD_PITCH, FD_YAW)
  * @param setpoint      Rate setpoint from RC [deg/s]
+ * @param setpointDelta Delta of setpoint from last loop (for acceleration)
  * @param gyroRate      Measured gyro rate [deg/s]
  * @param dT            Loop time [s]
  * @return              Feedforward command to add to PID output
  */
-float mbffUpdate(int axis, float setpoint, float gyroRate, float dT);
+float mbffUpdate(int axis, float setpoint, float setpointDelta, float gyroRate, float dT);
 
 /**
- * Update RPM data for effectiveness model.
- * Call once per PID loop with current motor RPM data.
+ * Update eRPM data from motor telemetry.
+ * Call once per PID loop before axis updates.
  */
 void mbffUpdateRpm(void);
-
-/**
- * Get current reference rate for an axis.
- * Useful for modifying PID error (error = omega_ref - gyro) if desired.
- */
-float mbffGetReferenceRate(int axis);
-
-/**
- * Get current torque effectiveness.
- * For debug/logging.
- */
-float mbffGetEffectiveness(void);
 
 /**
  * Check if MBFF is enabled.
  */
 bool mbffIsEnabled(void);
+
+/**
+ * Update the online RLS learner for an axis.
+ * Call once per axis during active maneuvers.
+ *
+ * @param axis          Axis index (FD_ROLL, FD_PITCH, FD_YAW)
+ * @param gyroRate      Measured gyro rate [deg/s]
+ * @param setpoint      Current setpoint [deg/s]
+ * @param saturated     True if axis command is saturated
+ */
+void mbffLearnUpdate(int axis, float gyroRate, float setpoint, bool saturated);
+
+/**
+ * Reset the learner state (e.g., on disarm).
+ * Keeps learned E values but resets prev_gyro.
+ */
+void mbffLearnReset(void);
+
+/**
+ * Get learned E value for an axis.
+ */
+float mbffGetLearnedE(int axis);
+
+/**
+ * Check if learner is currently gated (not updating).
+ */
+bool mbffLearnIsGated(void);
+
+/**
+ * Check if learner has enough confidence for an axis.
+ */
+bool mbffLearnIsConfident(int axis);
+
+/**
+ * Get the eRPM² differential for an axis (for debug).
+ */
+float mbffGetERPMSquaredDiff(int axis);
 
 // ---------------------------------------------------------------------------
 // Debug
@@ -153,14 +218,26 @@ bool mbffIsEnabled(void);
 
 // Debug mode indices when DEBUG_MODE = DEBUG_MBFF
 typedef enum {
-    MBFF_DEBUG_OMEGA_REF = 0,       // Reference rate [deg/s]
-    MBFF_DEBUG_ALPHA_DES,           // Desired acceleration [deg/s²]
-    MBFF_DEBUG_EFFECTIVENESS,       // Torque effectiveness [x1000]
-    MBFF_DEBUG_FF_OUTPUT,           // MBFF output [x100]
-    MBFF_DEBUG_CLASSIC_FF,          // Classic FF for comparison [x100]
-    MBFF_DEBUG_RPM_SQ,              // Avg RPM² / 1000
-    MBFF_DEBUG_TRAJ_ERROR,          // ω_sp - ω_ref [deg/s]
-    MBFF_DEBUG_TRACK_ERROR,         // ω_ref - ω_meas [deg/s]
+    MBFF_DEBUG_ERPM_SQ_DIFF = 0,    // eRPM² differential [/1e6]
+    MBFF_DEBUG_DELTA_GYRO,          // delta(gyro) [deg/s, sample-to-sample]
+    MBFF_DEBUG_E_RPM2,              // Current E_rpm² [x10000]
+    MBFF_DEBUG_FF_OUTPUT,           // FF output (raw)
+    MBFF_DEBUG_CLASSIC_FF,          // Classic FF for comparison
+    MBFF_DEBUG_SETPOINT,            // Current setpoint
+    MBFF_DEBUG_GYRO_RATE,           // Current gyro rate
+    MBFF_DEBUG_GATE_REASON,         // Gating reason flags
 } mbffDebugIndex_e;
+
+// Debug mode indices when DEBUG_MODE = DEBUG_MBFF_LEARN
+typedef enum {
+    MBFF_LEARN_DEBUG_E_ROLL = 0,    // Learned E for roll [x10000]
+    MBFF_LEARN_DEBUG_E_PITCH,       // Learned E for pitch [x10000]
+    MBFF_LEARN_DEBUG_GYRO_DELTA,    // Computed gyro delta [deg/s]
+    MBFF_LEARN_DEBUG_SETPOINT,      // Current setpoint [deg/s]
+    MBFF_LEARN_DEBUG_SAMPLES_ROLL,  // Learn count roll
+    MBFF_LEARN_DEBUG_SAMPLES_PITCH, // Learn count pitch
+    MBFF_LEARN_DEBUG_ERPM_SQ_DIFF,  // Current eRPM² diff [/1e6]
+    MBFF_LEARN_DEBUG_GATE_REASON,   // Gate reason flags
+} mbffLearnDebugIndex_e;
 
 #endif // USE_MBFF

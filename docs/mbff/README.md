@@ -1,154 +1,268 @@
-# Model-Based Feedforward (MBFF)
+# Model-Based Feedforward (MBFF) v2
 
 ## Overview
 
-MBFF is an experimental replacement for the classic Betaflight feedforward (F) term. Instead of computing feedforward from the rate setpoint derivative, MBFF uses:
+MBFF is an advanced feedforward system that replaces classic Betaflight feedforward with a physics-based approach validated by blackbox log analysis.
 
-1. **Reference Trajectory Model** - Smooth internal rate reference with configurable time constant
-2. **Desired Acceleration** - Combines trajectory-following and preview/tracking correction
-3. **Torque Effectiveness Model** - RPM-based scaling to adapt to throttle/battery state
+**Key discovery:** Angular acceleration correlates with **squared eRPM differential**, not motor command:
+
+```
+delta(gyro) ∝ (eRPM²_right - eRPM²_left)   R² = 0.89-0.99
+```
+
+This makes physical sense: thrust ∝ RPM² (propeller aerodynamics).
+
+**Why does this matter?** By using actual motor speed (eRPM) instead of commanded speed, MBFF bypasses ESC response time and thrust curve nonlinearities—resulting in highly accurate feedforward.
 
 ## Quick Start
 
-1. Enable MBFF via CLI:
+1. **Enable MBFF:**
    ```
    set mbff_enable = ON
+   save
    ```
 
-2. Start with conservative defaults:
+2. **Enable online learning (recommended):**
    ```
-   set mbff_ts = 15        # Trajectory time constant (ms)
-   set mbff_tp = 50        # Preview horizon (ms) - higher = less noise
-   set mbff_ka = 100       # Trajectory acceleration gain (x100)
-   set mbff_kr = 25        # Preview correction gain (x100) - lower = less noise
-   set mbff_b0 = 100       # Base effectiveness (x100)
-   set mbff_b1 = 50        # RPM-based effectiveness (x100)
-   set mbff_ff_limit = 50  # FF limit as % of max axis authority
-   set mbff_gain = 500     # Master output gain (x10, so 500 = 50.0x)
+   set mbff_learn_enable = ON
+   save
    ```
+   
+   The system will automatically learn your quad's effectiveness coefficient during flight.
 
-3. Reduce P and D gains (MBFF provides more sustained authority):
-   ```
-   # Try reducing P/D by 20-30% initially
-   ```
+3. **Fly aggressively.** MBFF learns during rapid maneuvers (>400 deg/s setpoint).
+
+**Requirement:** Bidirectional DSHOT for eRPM telemetry.
+
+## How It Works
+
+### The Delay Problem
+
+Your gyro signal passes through multiple filters before the PID controller sees it:
+
+```
+Gyro → LPF1 → LPF2 → Notch → Dynamic Notch → ... → PID
+```
+
+This filtering introduces **4-8ms of delay**. When you move the stick, the PID doesn't "see" the quad's response until milliseconds later—causing overshoot and sluggish correction.
+
+**Feedforward bypasses this delay** by computing an open-loop command directly.
+
+### The Validated Physics Model
+
+Blackbox analysis revealed a two-stage causal chain:
+
+```
+Relationship 1: delta(gyro) ~ eRPM²_diff        (R² = 0.89-0.99)
+Relationship 2: eRPM_diff ~ delta(motor_diff)  (R² = 0.62-0.90)
+```
+
+**Physics explanation:**
+1. **Thrust ∝ RPM²** — From propeller aerodynamics
+2. **Motor has inertia** — Command controls rate of change of RPM, not RPM itself
+
+### eRPM² Differential Formulas
+
+Motor mapping (Betaflight Quad X):
+```
+M0 = rear-right (CW)    M1 = front-right (CCW)
+M2 = rear-left (CCW)    M3 = front-left (CW)
+```
+
+```
+Roll:  (eRPM[0]² + eRPM[1]²) - (eRPM[2]² + eRPM[3]²)   [right - left]
+Pitch: (eRPM[0]² + eRPM[2]²) - (eRPM[1]² + eRPM[3]²)   [rear - front]
+Yaw:   (eRPM[0]² + eRPM[3]²) - (eRPM[1]² + eRPM[2]²)   [CW - CCW]
+```
+
+### FF Computation
+
+The physics model relates angular acceleration to eRPM² differential:
+
+```
+alpha = E_rpm2 × eRPM_sq_diff      [deg/s²]
+u_ff = alpha × ff_scale
+```
+
+Where:
+- `alpha` = angular acceleration (deg/s²)
+- `E_rpm2` = effectiveness coefficient (≈0.006 for roll, ≈0.003 for pitch)
+- `eRPM_sq_diff` = squared eRPM differential for the axis
+- `ff_scale` = output scaling to mixer units
+
+**Note on units:** E_rpm2 has units of (deg/s²) per (eRPM²_diff). The online learner time-scales the per-PID-loop gyro delta by multiplying by pidFrequency to get angular acceleration (deg/s²), ensuring learned E values match the Python-validated physics model.
 
 ## Configuration Parameters
 
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| `mbff_enable` | OFF | ON/OFF | Enable model-based feedforward |
-| `mbff_ts` | 15 | 5-50 | Trajectory time constant in ms |
-| `mbff_tp` | 50 | 10-100 | Preview horizon in ms (higher = less noise) |
-| `mbff_ka` | 100 | 0-200 | Trajectory acceleration gain (x100) |
-| `mbff_kr` | 25 | 0-200 | Preview/tracking correction gain (x100, lower = less noise) |
-| `mbff_b0` | 100 | 10-500 | Base torque effectiveness (x100) |
-| `mbff_b1` | 50 | 0-200 | RPM-based effectiveness scaling (x100) |
-| `mbff_ff_limit` | 50 | 10-100 | FF output limit as % of max axis authority |
-| `mbff_gain` | 500 | 10-2000 | Master output gain (x10, so 500 = 50.0x) |
-| `mbff_preview_threshold` | 50 | 0-200 | Setpoint rate-of-change threshold for preview (deg/s) |
+### Core Parameters
 
-## Debug Mode
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mbff_enable` | OFF | Enable model-based feedforward |
+| `mbff_e_rpm2_roll` | 0.006 | eRPM² effectiveness for roll (deg/s² per eRPM²_diff) |
+| `mbff_e_rpm2_pitch` | 0.003 | eRPM² effectiveness for pitch (deg/s² per eRPM²_diff) |
+| `mbff_e_rpm2_yaw` | 0.003 | eRPM² effectiveness for yaw (deg/s² per eRPM²_diff) |
+| `mbff_ff_scale` | 0.1 | Output scaling factor |
+| `mbff_ff_limit` | 0.5 | FF output limit (0-1) |
 
-Use `set debug_mode = MBFF` to log:
-- debug[0]: Reference rate (ω_ref) [deg/s]
-- debug[1]: Desired acceleration (α_des) [deg/s²]
-- debug[2]: Torque effectiveness (g) [raw value]
-- debug[3]: MBFF output (u_FF) [raw value]
-- debug[4]: Classic FF output for comparison [raw value]
-- debug[5]: Average RPM² / 1,000,000
-- debug[6]: Trajectory error (ω_sp - ω_ref) [deg/s]
-- debug[7]: Tracking error (ω_ref - ω_meas) [deg/s]
+### Learning Parameters
 
-## Preview Term Gating
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mbff_learn_enable` | ON | Enable online learning |
+| `mbff_lambda` | 0.995 | Forgetting factor for RLS |
+| `mbff_setpoint_thresh` | 400 | Min setpoint for learning (deg/s) |
+| `mbff_gyro_delta_thresh` | 4 | Min gyro delta per PID loop (deg/s) |
 
-The preview term (`k_r * (ω_ref - gyro) / T_p`) helps MBFF respond to tracking errors during maneuvers. However, it can amplify gyro noise during steady-state (hover or sustained rolls).
+**Note:** The E_rpm² values have units of (deg/s²) per (eRPM²_diff). They are small because eRPM² values are large (millions). The online learner time-scales gyro delta to angular acceleration, so learned E values match the Python-validated physics model.
 
-**Solution:** The preview term is gated by the rate of change of the setpoint:
-- When stick is **stationary** (hover or held in a roll): preview OFF → no noise amplification
-- When stick is **moving** (transitions): preview ON → helps tracking
+## Online Learning
+
+MBFF can automatically learn your quad's effectiveness coefficient (E_rpm²) during flight—no manual tuning required.
+
+### How It Works
+
+1. **Gate**: Check if conditions are valid (aggressive maneuvering, not crashed)
+2. **Measure**: Observe eRPM²_diff and corresponding angular acceleration (d(gyro)/dt)
+3. **Fit**: Use zero-intercept linear regression: `d(gyro)/dt = E × eRPM²_diff`
+4. **Update**: Smoothly blend new estimate using RLS with forgetting factor
+
+**Important:** The firmware measures gyro delta per PID loop (deg/s), then multiplies by `pidFrequency` to convert to angular acceleration (deg/s²). This ensures the learned E values match the Python-validated physics model (E ≈ 0.006 for roll, 0.003 for pitch).
+
+The learned coefficient adapts to your specific quad, props, battery voltage, and flight conditions.
+
+### Gating Conditions (Critical!)
+
+Learning is **only valid** under specific conditions:
+
+| Condition | Threshold | Why |
+|-----------|-----------|-----|
+| Active maneuvering | `\|setpoint\| > 400 deg/s` | Excludes hover noise |
+| Not crashed | `\|gyro_product\| < 1e6` | Excludes tumble data |
+| Accelerating | `\|delta(gyro)\| > 15` | Ensures measurable response |
+
+**Critical:** The gyro delta threshold is per **PID loop iteration**, NOT per blackbox sample! Blackbox logs every `frameIntervalPDenom` PID loops (typically 4), so blackbox gyro deltas appear ~4x larger.
+
+> **Implementation Note:** The `gyro_delta_thresh` default (4 deg/s) assumes a 4kHz PID loop. If using a different PID rate, this threshold may need adjustment. A future improvement would be to express this as angular acceleration (deg/s²) and scale automatically with PID frequency.
+
+### Enabling Learning
 
 ```
-preview_scale = |d(setpoint)/dt| / (threshold × 100)
+set mbff_learn_enable = ON
+set mbff_lambda = 995          # Forgetting factor (0.995)
+set mbff_setpoint_thresh = 400 # Min setpoint (deg/s)
+set mbff_gyro_delta_thresh = 4  # Min gyro delta per PID loop
+save
 ```
 
-Adjust `mbff_preview_threshold` to tune sensitivity:
-- **Higher values** (100-200): Preview activates only during aggressive stick movements
-- **Lower values** (25-50): Preview activates during gentler transitions
-- **0**: Disable gating (preview always on - may cause oscillation)
+Then fly with aggressive rolls and flips. Learning only occurs during rapid maneuvers.
+
+### Expected Results
+
+From blackbox analysis:
+- **Valid samples**: ~0.4% of flight time passes gating
+- **Typical yield**: 50-130 samples per 30-second aggressive flight
+- **R² achieved**: 0.89-0.99 with proper gating
+
+### Monitoring with Debug Mode
+
+Use `set debug_mode = MBFF_LEARN` to monitor learning:
+
+| Debug Slot | Value |
+|------------|-------|
+| debug[0] | Learned E_rpm² (roll) |
+| debug[1] | Learned E_rpm² (pitch) |
+| debug[2] | eRPM²_diff (current axis) |
+| debug[3] | delta(gyro) measured |
+| debug[4] | delta(gyro) predicted |
+| debug[5] | Gate status (0 = learning active) |
+| debug[6] | Sample count |
+| debug[7] | R² estimate |
+
+## Debug Modes
+
+### DEBUG_MBFF
+
+For monitoring FF output and behavior:
+
+| Debug Slot | Value |
+|------------|-------|
+| debug[0] | eRPM²_diff roll |
+| debug[1] | eRPM²_diff pitch |
+| debug[2] | MBFF output roll |
+| debug[3] | MBFF output pitch |
+| debug[4] | Gyro delta (sample-to-sample) |
+| debug[5] | Gate status |
+| debug[6] | E_rpm² roll (×10000) |
+| debug[7] | E_rpm² pitch (×10000) |
+
+### DEBUG_MBFF_LEARN
+
+See "Monitoring with Debug Mode" above.
 
 ## Tuning Guide
 
-### For Whoops (65-75mm)
-- Start with `mbff_ts = 18-22` (slightly slower trajectory)
-- `mbff_tp = 30-40` (longer preview for slower motors)
-- Lower `mbff_b0` if too aggressive
+### If Using Online Learning (Recommended)
 
-### For Freestyle (5")
-- `mbff_ts = 10-15` (faster trajectory)
-- `mbff_tp = 20-30`
-- Higher `mbff_b1` for more RPM adaptation
+**You probably don't need to tune anything.** Just enable learning and fly aggressively. The system will figure out E_rpm² automatically.
+
+If the quad feels sluggish initially:
+- Increase `mbff_e_rpm2_roll` / `mbff_e_rpm2_pitch`
+- Increase `mbff_ff_scale` for more overall FF authority
+
+### Manual Tuning (Without Learning)
+
+If you prefer manual tuning:
+
+1. **Start with validated defaults:**
+   ```
+   set mbff_e_rpm2_roll = 0.006
+   set mbff_e_rpm2_pitch = 0.003
+   set mbff_ff_scale = 0.1
+   ```
+
+2. **Increase E_rpm²** if tracking feels sluggish
+
+3. **Decrease E_rpm²** if over-rotating or oscillating
+
+4. **Increase ff_scale** for more overall FF effect
 
 ### Signs of Good Tuning
-- Smooth tracking at high rates
-- Less noise in motor outputs
-- Consistent feel across throttle range
-- Reduced need for high P/D
+
+- ✓ Stick response feels immediate
+- ✓ Tracking is accurate at all rotation rates  
+- ✓ Consistent feel across throttle range
+- ✓ Less oscillation than with high P/D
 
 ### Signs of Poor Tuning
-- Oscillation (reduce `mbff_ka` or increase `mbff_ts`)
-- Sluggish response (increase `mbff_ka`, decrease `mbff_ts`)
-- Over-reaction to throttle (reduce `mbff_b1`)
 
-## Theory
-
-See [PRD.md](PRD.md) for detailed design rationale.
-
-### Key Equations
-
-**Trajectory Update:**
-```
-ω_ref[k+1] = ω_ref[k] + (dt / T_s) · (ω_sp − ω_ref[k])
-```
-
-**Desired Acceleration:**
-```
-α_traj = (ω_sp − ω_ref) / T_s
-α_prev = (ω_ref − ω_meas) / T_p
-α_des = k_a · α_traj + k_r · α_prev
-```
-
-**Torque Effectiveness:**
-```
-g(RPM²) = b0 + b1 · (RPM² / 1e6)
-u_FF = gain · α_des / g(RPM²)
-```
+- ✗ Oscillation → reduce `mbff_ff_scale` or `mbff_e_rpm2_*`
+- ✗ Sluggish response → increase `mbff_e_rpm2_*` or enable learning
+- ✗ Inconsistent across throttle → verify eRPM telemetry is working
+- ✗ Over-rotation at high rates → increase `mbff_b_init`
 
 ## Comparison with Classic FF
 
-| Aspect | Classic FF | MBFF |
+| Aspect | Classic FF | MBFF v2 |
 |--------|-----------|------|
-| Input | d(setpoint)/dt | Setpoint + Gyro + RPM |
-| Max stick behavior | Drops to zero | Maintains authority |
-| Throttle adaptation | None (or separate TPA) | Built-in via RPM |
-| Noise sensitivity | Higher (derivative) | Lower (integration) |
-| Complexity | Simple | Moderate |
+| **Input** | d(setpoint)/dt | eRPM² differential |
+| **Model** | None (pure derivative) | Physics: thrust ∝ RPM² |
+| **R² correlation** | ~0.15 (motor cmd) | 0.89-0.99 (eRPM²) |
+| **Throttle adaptation** | Fixed or TPA | Automatic via eRPM |
+| **Tuning** | ff_weight, ff_boost | E_rpm² (auto-learned) |
+| **Requirement** | None | Bidirectional DSHOT |
 
 ## Requirements
 
-- Bidirectional DShot (for RPM telemetry)
-- STM32G4 or better recommended
-- Works without RPM but with reduced adaptation
-
-## Known Limitations (Prototype)
-
-- No yaw-specific tuning yet
-- No online learning/adaptation
-- Angle mode not yet integrated
-- Single set of parameters for all axes
+- **Bidirectional DShot** - Required for RPM telemetry (used for effectiveness scaling)
+- **STM32G4 or better** - Recommended for computational headroom
+- Works without RPM but with reduced adaptation capability
 
 ## Files
 
-- `src/main/flight/mbff.h` - Header with types and API
-- `src/main/flight/mbff.c` - Core implementation
-- `docs/mbff/PRD.md` - Product requirements document
-- `docs/mbff/README.md` - This file
+| File | Description |
+|------|-------------|
+| `src/main/flight/mbff.h` | Header with types and API |
+| `src/main/flight/mbff.c` | Core implementation |
+| `docs/mbff/PRD.md` | Product requirements document |
+| `docs/mbff/README.md` | This file |

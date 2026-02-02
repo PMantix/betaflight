@@ -152,6 +152,7 @@ typedef enum {
     TABLE_TPA_SPEED_TYPE,
     TABLE_YAW_TYPE,
 #endif // USE_WING
+    TABLE_DTERM_MODE,
     LOOKUP_TABLE_COUNT
 } lookupTableIndex_e;
 

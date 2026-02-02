@@ -268,6 +268,7 @@ void resetPidProfile(pidProfile_t *pidProfile)
         .chirp_frequency_start_deci_hz = 2,
         .chirp_frequency_end_deci_hz = 6000,
         .chirp_time_seconds = 20,
+        .dterm_mode = 0,  // 0 = GYRO (default), 1 = ERROR
     );
 }
 
@@ -1404,6 +1405,8 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
             pidSetpointDelta = getFeedforward(axis);
         }
 #endif
+        // Calculate setpoint delta BEFORE updating previousPidSetpoint (needed for error-based D)
+        const float pidSetpointDeltaForD = currentPidSetpoint - pidRuntime.previousPidSetpoint[axis];
         pidRuntime.previousPidSetpoint[axis] = currentPidSetpoint; // this is the value sent to blackbox, and used for D-max setpoint
 
         // disable D if launch control is active
@@ -1413,7 +1416,18 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
             // This is done to avoid DTerm spikes that occur with dynamically
             // calculated deltaT whenever another task causes the PID
             // loop execution to be delayed.
-            const float delta = - (gyroRateDterm[axis] - previousGyroRateDterm[axis]) * pidRuntime.pidFrequency;
+            float delta;
+            if (pidRuntime.dtermMode == 0) {
+                // GYRO mode (default): D based on gyro rate change
+                delta = -(gyroRateDterm[axis] - previousGyroRateDterm[axis]) * pidRuntime.pidFrequency;
+            } else {
+                // ERROR mode: D based on error change (setpoint - gyro)
+                // error_now = setpoint_now - gyro_now
+                // error_prev = setpoint_prev - gyro_prev  
+                // delta(error) = error_now - error_prev = (setpoint_now - setpoint_prev) - (gyro_now - gyro_prev)
+                const float gyroDelta = gyroRateDterm[axis] - previousGyroRateDterm[axis];
+                delta = (pidSetpointDeltaForD - gyroDelta) * pidRuntime.pidFrequency;
+            }
             float preTpaD = pidRuntime.pidCoefficient[axis].Kd * delta;
 
 #if defined(USE_ACC)
@@ -1470,12 +1484,17 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 #endif
 
 #ifdef USE_MBFF
-        // Model-Based Feedforward (replaces classic FF when enabled)
-        if (mbffIsEnabled() && !launchControlActive) {
-            pidData[axis].F = mbffUpdate(axis, currentPidSetpoint, gyroRate, pidRuntime.dT);
+        // Model-Based Feedforward v2 (eRPM² physics model):
+        // - When learning is disabled: use MBFF with configured E_rpm²
+        // - When learning is enabled but not confident: use classic FF while gathering data
+        // - When learning is confident: use MBFF with learned E_rpm²
+        const bool useMbff = mbffIsEnabled() && !launchControlActive && 
+                             (!mbffConfig()->learn_enable || mbffLearnIsConfident(axis));
+        if (useMbff) {
+            pidData[axis].F = mbffUpdate(axis, currentPidSetpoint, pidSetpointDelta, gyroRate, pidRuntime.dT);
             // Log classic FF for comparison in debug mode
             if (axis == gyro.gyroDebugAxis && debugMode == DEBUG_MBFF) {
-                DEBUG_SET(DEBUG_MBFF, 4, lrintf(pidRuntime.pidCoefficient[axis].Kf * pidSetpointDelta * 100.0f));
+                DEBUG_SET(DEBUG_MBFF, MBFF_DEBUG_CLASSIC_FF, lrintf(pidRuntime.pidCoefficient[axis].Kf * pidSetpointDelta));
             }
         } else
 #endif
@@ -1543,6 +1562,18 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         {
             pidData[axis].Sum = pidSum;
         }
+        
+#ifdef USE_MBFF
+        // Update MBFF online learner with setpoint and saturation status
+        if (mbffIsEnabled()) {
+            // Determine if axis is saturated (hit pidSumLimit)
+            const float pidSumLimit = (axis == FD_YAW) ? (float)PIDSUM_LIMIT_YAW : (float)PIDSUM_LIMIT;
+            const bool saturated = fabsf(pidSum) >= pidSumLimit * 0.99f;
+            
+            // Call RLS learner with gyro rate, setpoint, and saturation status
+            mbffLearnUpdate(axis, gyroRate, currentPidSetpoint, saturated);
+        }
+#endif
     }
 
 #ifdef USE_WING
