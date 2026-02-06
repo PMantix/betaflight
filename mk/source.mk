@@ -24,6 +24,7 @@ PG_SRC = \
             pg/mco.c \
             pg/motor.c \
             pg/msp.c \
+            pg/ff_autotune.c \
             pg/pg.c \
             pg/pilot.c \
             pg/piniobox.c \
@@ -167,6 +168,7 @@ COMMON_SRC = \
             flight/mixer.c \
             flight/mixer_init.c \
             flight/mixer_tricopter.c \
+            flight/ff_autotune.c \
             flight/pid.c \
             flight/pid_init.c \
             flight/position.c \

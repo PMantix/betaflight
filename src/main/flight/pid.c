@@ -46,6 +46,7 @@
 #include "fc/runtime_config.h"
 
 #include "flight/autopilot.h"
+#include "flight/ff_autotune.h"
 #include "flight/gps_rescue.h"
 #include "flight/imu.h"
 #include "flight/mixer.h"
@@ -1405,7 +1406,21 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
             // This is done to avoid DTerm spikes that occur with dynamically
             // calculated deltaT whenever another task causes the PID
             // loop execution to be delayed.
-            const float delta = - (gyroRateDterm[axis] - previousGyroRateDterm[axis]) * pidRuntime.pidFrequency;
+            float delta;
+#ifdef USE_FF_AUTOTUNE
+            static float previousErrorRate[XYZ_AXIS_COUNT];
+            if (ffAutotuneIsActive() && axis <= FD_PITCH) {
+                // Error-based D: derivative of (setpoint - gyro) for better tracking
+                const float currentError = currentPidSetpoint - gyroRateDterm[axis];
+                delta = (currentError - previousErrorRate[axis]) * pidRuntime.pidFrequency;
+                previousErrorRate[axis] = currentError;
+            } else {
+                // Standard gyro-based D
+                delta = - (gyroRateDterm[axis] - previousGyroRateDterm[axis]) * pidRuntime.pidFrequency;
+            }
+#else
+            delta = - (gyroRateDterm[axis] - previousGyroRateDterm[axis]) * pidRuntime.pidFrequency;
+#endif
             float preTpaD = pidRuntime.pidCoefficient[axis].Kd * delta;
 
 #if defined(USE_ACC)
@@ -1522,6 +1537,11 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         {
             pidData[axis].Sum = pidSum;
         }
+
+#ifdef USE_FF_AUTOTUNE
+        // Update FF autotune tracking
+        ffAutotuneUpdate(axis, currentPidSetpoint, gyroRate, pidSetpointDelta, currentTimeUs);
+#endif
     }
 
 #ifdef USE_WING

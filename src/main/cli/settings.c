@@ -113,6 +113,7 @@
 #include "pg/rcdevice.h"
 #include "pg/stats.h"
 #include "pg/board.h"
+#include "pg/ff_autotune.h"
 
 #include "rx/a7105_flysky.h"
 #include "rx/cc2500_frsky_common.h"
@@ -2061,6 +2062,21 @@ const clivalue_t valueTable[] = {
     { "gimbal_yaw_limit",          VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { -100, 100 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_yaw_limit) },
     { "gimbal_stabilisation",      VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 7 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_stabilisation) },
     { "gimbal_sensitivity",        VAR_INT8 | MASTER_VALUE, .config.minmaxUnsigned = { -16, 15 }, PG_GIMBAL_TRACK_CONFIG, offsetof(gimbalTrackConfig_t, gimbal_sensitivity) },
+#endif
+
+// PG_FF_AUTOTUNE_CONFIG
+#ifdef USE_FF_AUTOTUNE
+    { "ff_autotune_enabled",            VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, enabled) },
+    { "ff_autotune_setpoint_low",       VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 50, 300 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, setpoint_low) },
+    { "ff_autotune_setpoint_high",      VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 300, 1000 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, setpoint_high) },
+    { "ff_autotune_min_accel",          VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 50, 500 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, min_accel) },
+    { "ff_autotune_gain_step",          VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 20 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_step) },
+    { "ff_autotune_gain_max",           VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 50, 255 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_max) },
+    { "ff_autotune_gain_min",           VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 50 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_min) },
+    { "ff_autotune_error_deadband",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 50 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, error_deadband) },
+    { "ff_autotune_converge_threshold", VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, converge_threshold) },
+    { "ff_autotune_gain_roll",          VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 255 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_roll) },
+    { "ff_autotune_gain_pitch",         VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 255 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_pitch) },
 #endif
 };
 
