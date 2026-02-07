@@ -24,12 +24,10 @@
 
 // Window state machine for debug visibility
 typedef enum {
-    FF_WINDOW_IDLE = 0,      // Setpoint below threshold
-    FF_WINDOW_RISING,        // In tracking window, acceleration positive
-    FF_WINDOW_PEAK,          // In window, acceleration slowing
-    FF_WINDOW_FALLING,       // Exiting window
-    FF_WINDOW_SETTLING,      // Post-maneuver settle time
-    FF_WINDOW_ADJUSTING      // Applying gain change
+    FF_WINDOW_IDLE = 0,      // Waiting for rise: neutral setpoint, low accel
+    FF_WINDOW_RISING,        // Setpoint in range, accel away from center - MEASURE HERE
+    FF_WINDOW_ADJUSTING,     // No longer rising: wait 100ms then adjust F term
+    FF_WINDOW_WAITING        // Wait for setpoint to return to neutral before next cycle
 } ffWindowState_e;
 
 // Bracket convergence state

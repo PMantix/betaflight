@@ -1,0 +1,1 @@
+make[2]: 'obj/betaflight_2026.6.0-alpha_STM32G47X_BETAFPVG473.hex' is up to date.

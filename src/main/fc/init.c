@@ -101,6 +101,7 @@
 #include "flight/gps_rescue.h"
 #include "flight/pid.h"
 #include "flight/pid_init.h"
+#include "flight/ff_autotune.h"
 #include "flight/position.h"
 #include "flight/pos_hold.h"
 #include "flight/servos.h"
@@ -688,6 +689,10 @@ void initPhase3(void)
     gyroInitFilters();
 
     pidInit(currentPidProfile);
+
+#ifdef USE_FF_AUTOTUNE
+    ffAutotuneInit();
+#endif
 
     mixerInitProfile();
 

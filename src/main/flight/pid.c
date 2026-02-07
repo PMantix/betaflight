@@ -1476,7 +1476,15 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         pidRuntime.oldSetpointCorrection[axis] = setpointCorrection;
 #endif
         // no feedforward in launch control
-        const float feedforwardGain = launchControlActive ? 0.0f : pidRuntime.pidCoefficient[axis].Kf;
+        float feedforwardGain = launchControlActive ? 0.0f : pidRuntime.pidCoefficient[axis].Kf;
+        
+#ifdef USE_FF_AUTOTUNE
+        // When FF autotune is active, override feedforward gain with learned value
+        if (ffAutotuneIsActive() && axis <= FD_PITCH) {
+            feedforwardGain = FEEDFORWARD_SCALE * (ffAutotuneGetGain(axis) * 0.01f);
+        }
+#endif
+        
         pidData[axis].F = feedforwardGain * pidSetpointDelta;
 
 #ifdef USE_YAW_SPIN_RECOVERY

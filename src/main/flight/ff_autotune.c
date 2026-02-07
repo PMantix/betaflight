@@ -72,7 +72,7 @@
 
 #define FF_AUTOTUNE_HISTORY_SIZE    8       // Ring buffer size per axis
 #define FF_AUTOTUNE_MIN_SAMPLES     50      // Minimum samples for valid maneuver
-#define FF_AUTOTUNE_SETTLE_TIME_US  50000   // 50ms settle after maneuver
+#define FF_AUTOTUNE_ADJUST_DELAY_US 100000  // 100ms delay before adjusting F term
 
 // ============================================================================
 // HISTORY ENTRY
@@ -407,8 +407,7 @@ static uint8_t calculateNextGain(ffAxisState_t *state, int16_t avgError)
 static void processManeuverEnd(ffAxisState_t *state, int axis)
 {
     if (state->sampleCount < FF_AUTOTUNE_MIN_SAMPLES) {
-        // Not enough samples, discard
-        state->windowState = FF_WINDOW_IDLE;
+        // Not enough samples, discard - but still go to WAITING
         state->errorAccumulator = 0.0f;
         state->sampleCount = 0;
         return;
@@ -437,9 +436,8 @@ static void processManeuverEnd(ffAxisState_t *state, int axis)
     }
     
     state->maneuverCount++;
-    state->windowState = FF_WINDOW_ADJUSTING;
     
-    // Reset for next maneuver
+    // Reset accumulators for next maneuver (state transition handled by caller)
     state->errorAccumulator = 0.0f;
     state->sampleCount = 0;
     
@@ -464,19 +462,26 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
     const float setpointAccel = setpointDelta * pidFrequency;
     const float absAccel = fabsf(setpointAccel);
     
-    // Tracking error (positive = gyro ahead, negative = gyro lagging)
-    const float trackingError = gyroRate - setpoint;
+    // Tracking error using magnitude comparison (works for both positive and negative maneuvers)
+    // Positive = gyro magnitude ahead of setpoint magnitude (LEAD)
+    // Negative = gyro magnitude behind setpoint magnitude (LAG)
+    const float trackingError = fabsf(gyroRate) - fabsf(setpoint);
     
-    // Check if in tracking window
-    const bool inWindow = (absSetpoint >= setpointLow) && 
-                          (absSetpoint <= setpointHigh) &&
-                          (absAccel >= minAccel);
+    // Determine if setpoint magnitude is increasing (stick moving away from center)
+    const bool magnitudeIncreasing = (setpoint * setpointDelta) > 0;
     
-    // State machine
+    // Zone checks
+    const bool isNeutral = (absSetpoint < setpointLow);
+    const bool inSetpointWindow = (absSetpoint >= setpointLow) && (absSetpoint <= setpointHigh);
+    const bool hasSignificantAccel = (absAccel >= minAccel);
+    
+    // Simple state machine:
+    // IDLE -> RISING -> ADJUSTING -> WAITING -> IDLE
     switch (state->windowState) {
         case FF_WINDOW_IDLE:
-            if (inWindow) {
-                // Entering tracking window
+            // IDLE: waiting for rise - neutral setpoint and low accel
+            // Transition to RISING when setpoint enters window with increasing magnitude
+            if (inSetpointWindow && magnitudeIncreasing && hasSignificantAccel) {
                 state->windowState = FF_WINDOW_RISING;
                 state->errorAccumulator = trackingError;
                 state->sampleCount = 1;
@@ -484,45 +489,33 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
             break;
             
         case FF_WINDOW_RISING:
-            if (!inWindow) {
-                // Exited window
-                state->windowState = FF_WINDOW_SETTLING;
-                state->maneuverEndTime = currentTimeUs;
-            } else {
-                // Still in window
-                if (absAccel < state->prevAccel) {
-                    state->windowState = FF_WINDOW_PEAK;
-                }
+            // RISING: setpoint in range, accel away from center - MEASURE HERE
+            // Stay in RISING as long as magnitude is increasing with significant accel
+            if (magnitudeIncreasing && hasSignificantAccel) {
+                // Still rising - accumulate tracking error
                 state->errorAccumulator += trackingError;
                 state->sampleCount++;
-            }
-            break;
-            
-        case FF_WINDOW_PEAK:
-            if (!inWindow) {
-                state->windowState = FF_WINDOW_SETTLING;
-                state->maneuverEndTime = currentTimeUs;
             } else {
-                state->errorAccumulator += trackingError;
-                state->sampleCount++;
-            }
-            break;
-            
-        case FF_WINDOW_FALLING:
-            // Fallthrough to settling
-            state->windowState = FF_WINDOW_SETTLING;
-            state->maneuverEndTime = currentTimeUs;
-            break;
-            
-        case FF_WINDOW_SETTLING:
-            if (cmpTimeUs(currentTimeUs, state->maneuverEndTime) >= FF_AUTOTUNE_SETTLE_TIME_US) {
-                processManeuverEnd(state, axis);
+                // No longer rising (accel dropped or direction changed) -> ADJUSTING
+                state->windowState = FF_WINDOW_ADJUSTING;
+                state->maneuverEndTime = currentTimeUs;
             }
             break;
             
         case FF_WINDOW_ADJUSTING:
-            // Adjustment complete, return to idle
-            state->windowState = FF_WINDOW_IDLE;
+            // ADJUSTING: wait 100ms, then process and adjust F term, then -> WAITING
+            if (cmpTimeUs(currentTimeUs, state->maneuverEndTime) >= FF_AUTOTUNE_ADJUST_DELAY_US) {
+                processManeuverEnd(state, axis);
+                state->windowState = FF_WINDOW_WAITING;
+            }
+            break;
+            
+        case FF_WINDOW_WAITING:
+            // WAITING: wait for setpoint to return to neutral and accel to settle
+            // Once neutral with low accel -> back to IDLE (one test cycle complete)
+            if (isNeutral && !hasSignificantAccel) {
+                state->windowState = FF_WINDOW_IDLE;
+            }
             break;
     }
     

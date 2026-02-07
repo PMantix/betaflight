@@ -213,6 +213,7 @@
 #define USE_OSD_HD
 #endif
 #define USE_BLACKBOX
+#define USE_FF_AUTOTUNE
 
 #if TARGET_FLASH_SIZE >= 1024
 
@@ -253,7 +254,6 @@
 #define USE_ESCSERIAL_SIMONK
 #define USE_ALTITUDE_HOLD
 #define USE_POSITION_HOLD
-#define USE_FF_AUTOTUNE
 
 #if !defined(USE_GPS)
 #define USE_GPS
