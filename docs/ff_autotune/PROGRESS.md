@@ -1,8 +1,8 @@
 # FF Autotune v3 Implementation Progress
 
-> **Last Updated:** 2026-02-05  
-> **Branch:** `ff-autotune-v1`  
-> **Commits:** `dc39e2eea` (PRD), `78ae93515` (Implementation)
+> **Last Updated:** 2026-02-07
+> **Branch:** `ff-autotune-v1`
+> **Commits:** `dc39e2eea` (PRD), `78ae93515` (Phase 1 Implementation)
 
 ---
 
@@ -10,250 +10,193 @@
 
 | Category | Planned | Implemented | Status |
 |----------|---------|-------------|--------|
-| Functional Requirements | 8 | 8 | ✅ Complete |
-| CLI Parameters | 11 | 11 | ✅ Complete |
-| Debug Channels | 8 | 8 | ✅ Complete |
-| New Files | 4 | 4 | ✅ Complete |
-| Modified Files | 7 | 9 | ✅ Exceeded |
+| Phase 1 Functional Requirements | 8 | 8 | Complete |
+| Phase 1 CLI Parameters | 11 | 11 | Complete |
+| Phase 1 Debug Channels | 8 | 8 | Complete |
+| Phase 2 Functional Requirements | 6 | 6 | Complete |
+| Phase 2 CLI Parameters | 14 | 14 | Complete |
+| Phase 2 Debug Channels | 8 | 8 | Complete |
+| New Files | 4 | 4 | Complete |
+| Modified Files | 9 | 9 | Complete |
 
-**Overall Status: ✅ IMPLEMENTATION COMPLETE - READY FOR FLIGHT TEST**
+**Overall Status: PHASE 2 IMPLEMENTATION COMPLETE - READY FOR FLIGHT TEST**
 
 ---
 
-## Functional Requirements
+## Phase 1: F-Term Tuning (Previously Complete)
 
-### FR1: Error-Based D-Term ✅ COMPLETE
+### FR1: Error-Based D-Term - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| Switch D-term from gyro-based to error-based when active | ✅ | [pid.c#L1410-L1423](../../../src/main/flight/pid.c#L1410-L1423) |
-| Store previous setpoint for error derivative | ✅ | `static float previousErrorRate[XYZ_AXIS_COUNT]` |
-| Only affects roll/pitch when tuning active | ✅ | `if (ffAutotuneIsActive() && axis <= FD_PITCH)` |
+| Switch D-term from gyro-based to error-based when active | Done | pid.c L1410-L1423 |
+| Store previous setpoint for error derivative | Done | `static float previousErrorRate[XYZ_AXIS_COUNT]` |
+| Only affects roll/pitch when tuning active | Done | `if (ffAutotuneIsActive() && axis <= FD_PITCH)` |
 
-**Implementation Details:**
-```c
-// Error-based D: derivative of (setpoint - gyro) for better tracking
-const float currentError = currentPidSetpoint - gyroRateDterm[axis];
-delta = (currentError - previousErrorRate[axis]) * pidRuntime.pidFrequency;
-```
-
----
-
-### FR2: Setpoint Tracking Monitor ✅ COMPLETE
+### FR2: Setpoint Tracking Monitor - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| Detect tracking window (|setpoint| 100-600 deg/s) | ✅ | [ff_autotune.c#L459-L466](../../../src/main/flight/ff_autotune.c#L459-L466) |
-| Trigger on |setpoint_accel| > 10000 deg/s² | ✅ | `min_accel * 100.0f` |
-| Accumulate tracking error during window | ✅ | `state->errorAccumulator += trackingError` |
-| State machine: IDLE→RISING→PEAK→FALLING→SETTLING→ADJUSTING | ✅ | `ffWindowState_e` enum |
-| Minimum 50 samples for valid maneuver | ✅ | `FF_AUTOTUNE_MIN_SAMPLES = 50` |
-| 50ms settle time after maneuver | ✅ | `FF_AUTOTUNE_SETTLE_TIME_US = 50000` |
+| Detect tracking window | Done | ff_autotune.c `updateAxisTracking()` |
+| Trigger on acceleration threshold | Done | `min_accel * 100.0f` |
+| Accumulate tracking error during window | Done | `state->errorAccumulator += trackingError` |
+| State machine: IDLE->RISING->ADJUSTING->WAITING | Done | `ffWindowState_e` enum |
+| Minimum 50 samples for valid maneuver | Done | `FF_AUTOTUNE_MIN_SAMPLES = 50` |
 
----
-
-### FR3: Gain Adjustment Logic ✅ COMPLETE
+### FR3: Gain Adjustment Logic - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| Negative error (lag) → increase FF | ✅ | [ff_autotune.c#L358-L360](../../../src/main/flight/ff_autotune.c#L358-L360) |
-| Positive error (lead) → decrease FF | ✅ | [ff_autotune.c#L361-L363](../../../src/main/flight/ff_autotune.c#L361-L363) |
-| Error within deadband → no change | ✅ | Handled by bracket logic |
-| Binary search when bracketed | ✅ | `newGain = (lowerGain + upperGain) / 2` |
-| Stop adjustment when converged | ✅ | `FF_BRACKET_CONVERGED` state check |
+| Lag -> increase FF | Done | `calculateNextGain()` |
+| Lead -> decrease FF | Done | `calculateNextGain()` |
+| Binary search when bracketed | Done | `(lowerGain + upperGain) / 2` |
+| Stop adjustment when converged | Done | `FF_BRACKET_CONVERGED` |
 
-**Three-Phase Convergence:**
-1. **SEARCHING** - Linear step in error direction
-2. **BRACKETED** - Binary search within bracket
-3. **CONVERGED** - Hold at midpoint of final bracket
+### FR4-FR8: Per-Axis Learning, Mode Control, EEPROM, Debug, History - ALL COMPLETE
 
 ---
 
-### FR4: Per-Axis Learning ✅ COMPLETE
+## Phase 2: P/D Ratio Tuning (NEW)
+
+### FR9: Ringing Analysis Window - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| Separate state for Roll | ✅ | `runtime.axis[FD_ROLL]` |
-| Separate state for Pitch | ✅ | `runtime.axis[FD_PITCH]` |
-| Independent gain tracking | ✅ | `ffAxisState_t` struct per axis |
-| Independent history buffers | ✅ | 8-entry buffer each |
-| Independent bracket state | ✅ | Separate `lowerGain`, `upperGain` |
+| Open analysis window at end of RISING state | Done | ff_autotune.c `ringWindowOpen()` at RISING->ADJUSTING transition |
+| Configurable window duration (default 150ms) | Done | `ring_window_ms` CLI parameter |
+| Window closes on duration expiry or state transition | Done | Timer check in `updateAxisTracking()` + close in WAITING->IDLE |
+| Signed error tracking (gyro - setpoint) | Done | `signedError = gyroRate - setpoint` |
 
----
-
-### FR5: Flight Mode Control ✅ COMPLETE
+### FR10: Ringing Detection - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| New box mode `BOXFFAUTOTUNE` | ✅ | [rc_modes.h](../../../src/main/fc/rc_modes.h) |
-| Permanent ID 56 | ✅ | [msp_box.c](../../../src/main/msp/msp_box.c) |
-| Only active when armed | ✅ | `ARMING_FLAG(ARMED)` check |
-| Beeper on activation | ✅ | `beeper(BEEPER_RX_SET)` |
-| Beeper on save | ✅ | `beeper(BEEPER_READY_BEEP)` |
+| Zero-crossing count with deadband | Done | `ringWindowAccumulate()` with `ring_deadband` filtering |
+| Skip first overshoot peak | Done | `ringFirstPeakPassed` flag, first crossing marks transition |
+| Peak-to-peak amplitude after first peak | Done | `ringPeakPos - ringPeakNeg` tracked after first peak |
+| Combined ringing score (crossings x avg amplitude) | Done | `ringWindowClose()` computes score |
+| Three-level assessment (WELL_DAMPED / MILD / RINGING) | Done | `assessRinging()` with threshold and threshold/2 |
 
----
-
-### FR6: EEPROM Save Policy ✅ COMPLETE
+### FR11: Phase 2a P-Term Adjustment - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| Save only on mode deactivation | ✅ | [ff_autotune.c#L568-L571](../../../src/main/flight/ff_autotune.c#L568-L571) |
-| Track `gainsModified` flag | ✅ | `runtime.gainsModified` |
-| Save both roll and pitch gains | ✅ | `ffAutotuneSaveGains()` |
-| Clear modified flag after save | ✅ | `runtime.gainsModified = false` |
+| Decrease P when ringing detected | Done | `pAdjustment -= p_step` in `processPhase2Ringing()` |
+| P bracket via ringing/well-damped boundary | Done | `ringLowerP` / `ringUpperP` tracking |
+| Binary search within P bracket | Done | `(ringLowerP + ringUpperP) / 2` |
+| Convergence when bracket width <= step | Done | `bracketWidth <= pStep` check |
+| P reduction capped by `p_adjust_max` | Done | `pAdjMax = -(int16_t)p_adjust_max` limit |
 
-**Implementation:**
-```c
-} else if (!modeActive && runtime.wasActive) {
-    // Just deactivated - save if modified
-    runtime.active = false;
-    if (runtime.gainsModified) {
-        ffAutotuneSaveGains();
-    }
-}
-```
-
----
-
-### FR7: Debug Output ✅ COMPLETE
-
-| PRD Channel | Content | Implemented | Location |
-|-------------|---------|-------------|----------|
-| 0 | Current Gain | ✅ | `state->gain` |
-| 1 | Tracking Error | ✅ | `lrintf(trackingError)` |
-| 2 | Window State | ✅ | `state->windowState` |
-| 3 | Last Assessment | ✅ | `state->lastAssessment` |
-| 4 | Last Avg Error | ✅ | `state->lastAvgError` |
-| 5 | Sample Count | ✅ | `state->sampleCount` (capped 255) |
-| 6 | History Count | ✅ | `state->historyCount` |
-| 7 | Bracket State | ✅ | `state->bracketState` |
-
-**Debug Mode:** `DEBUG_FF_AUTOTUNE` added to [debug.h](../../../src/main/build/debug.h) and [debug.c](../../../src/main/build/debug.c)
-
----
-
-### FR8: Performance History & Bracketing ✅ COMPLETE
+### FR12: Phase 2b D-Term Adjustment (Fallback) - COMPLETE
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| 8-entry ring buffer per axis | ✅ | `FF_AUTOTUNE_HISTORY_SIZE = 8` |
-| Store (gain, avgError, sampleCount) tuples | ✅ | `ffHistoryEntry_t` struct |
-| Intelligent eviction (preserve diversity) | ✅ | `findEvictionIndex()` |
-| Never evict lower bracket bound | ✅ | `isLowerBound[]` check |
-| Never evict upper bracket bound | ✅ | `isUpperBound[]` check |
-| Evict same-type samples first | ✅ | `newType` matching logic |
-| Update bracket bounds on new samples | ✅ | [ff_autotune.c#L327-L340](../../../src/main/flight/ff_autotune.c#L327-L340) |
-| Check for bracket establishment | ✅ | [ff_autotune.c#L343-L352](../../../src/main/flight/ff_autotune.c#L343-L352) |
+| Enter Phase 2b when P hits reduction limit | Done | `state->adjustingD = true` when `newP < pAdjMax` |
+| Increase D by `d_step` when ringing persists | Done | `dAdjustment += dStep` |
+| D increase capped by `d_adjust_max` | Done | `newD <= dAdjMax` check |
+| Converge when well-damped or D limit reached | Done | Sets `FF_BRACKET_CONVERGED` |
+
+### FR13: Phase 3 F-Term Spot Check - COMPLETE
+
+| Requirement | Status | Implementation |
+|-------------|--------|----------------|
+| Activate after Phase 2 convergence | Done | `state->phase = FF_AUTOTUNE_PHASE3_RECHECK` |
+| Collect 3 tracking error maneuvers | Done | `FF_PHASE3_RECHECK_COUNT = 3` |
+| Compare against Phase 1 converged error | Done | `errorDrift = recheckAvg - recheckAvgError` |
+| If within deadband: mark COMPLETE | Done | `state->phase = FF_AUTOTUNE_COMPLETE` |
+| If drifted: re-open Phase 1 bracket | Done | `state->phase = FF_AUTOTUNE_PHASE1_FF` with narrow bracket |
+
+### FR14: P/D Override in PID Controller - COMPLETE
+
+| Requirement | Status | Implementation |
+|-------------|--------|----------------|
+| P-term adjustment applied as delta | Done | pid.c L1345-L1349: `pidData[axis].P += PTERM_SCALE * (pAdj * 0.01f) * errorRate * tpa` |
+| D-term adjustment applied as delta | Done | pid.c L1430-L1434: `preTpaD += DTERM_SCALE * (dAdj * 0.01f) * delta` |
+| Only affects roll/pitch | Done | `axis <= FD_PITCH` guard |
+| Adjustments stored as deltas from base PID | Done | Config stores `p_adj_roll/pitch`, `d_adj_roll/pitch` |
 
 ---
 
-## CLI Parameters
+## Phase 2 CLI Parameters
 
-| Parameter | PRD Default | Implemented Default | Status |
-|-----------|-------------|---------------------|--------|
-| `ff_autotune_enabled` | OFF | OFF | ✅ |
-| `ff_autotune_setpoint_low` | 100 | 100 | ✅ |
-| `ff_autotune_setpoint_high` | 600 | 600 | ✅ |
-| `ff_autotune_min_accel` | 100 | 100 | ✅ |
-| `ff_autotune_gain_step` | 5 | 5 | ✅ |
-| `ff_autotune_gain_max` | 200 | 200 | ✅ |
-| `ff_autotune_gain_min` | 0 | 0 | ✅ |
-| `ff_autotune_error_deadband` | 10 | 10 | ✅ |
-| `ff_autotune_converge_threshold` | 3 | 3 | ✅ |
-| `ff_autotune_gain_roll` | 0 | 0 | ✅ |
-| `ff_autotune_gain_pitch` | 0 | 0 | ✅ |
-
----
-
-## Files Created
-
-| File | Lines | Status |
-|------|-------|--------|
-| `src/main/flight/ff_autotune.h` | ~60 | ✅ Created |
-| `src/main/flight/ff_autotune.c` | ~588 | ✅ Created |
-| `src/main/pg/ff_autotune.h` | ~40 | ✅ Created |
-| `src/main/pg/ff_autotune.c` | ~45 | ✅ Created |
+| Parameter | Default | Range | Status |
+|-----------|---------|-------|--------|
+| `ff_autotune_pd_enabled` | ON | OFF/ON | Done |
+| `ff_autotune_ring_window_ms` | 150 | 50-250 | Done |
+| `ff_autotune_ring_threshold` | 20 | 5-100 | Done |
+| `ff_autotune_ring_deadband` | 5 | 2-20 | Done |
+| `ff_autotune_p_step` | 2 | 1-5 | Done |
+| `ff_autotune_d_step` | 1 | 1-3 | Done |
+| `ff_autotune_p_adjust_max` | 10 | 2-20 | Done |
+| `ff_autotune_d_adjust_max` | 5 | 1-10 | Done |
+| `ff_autotune_p_adj_roll` | 0 | -20..0 | Done |
+| `ff_autotune_p_adj_pitch` | 0 | -20..0 | Done |
+| `ff_autotune_d_adj_roll` | 0 | 0..10 | Done |
+| `ff_autotune_d_adj_pitch` | 0 | 0..10 | Done |
 
 ---
 
-## Files Modified
+## Phase 2 Debug Channels
+
+Debug mode: `DEBUG_FF_AUTOTUNE_PD`
+
+| Channel | Name | Description |
+|---------|------|-------------|
+| `debug[0]` | Ringing Score | Combined ringing score from last maneuver |
+| `debug[1]` | Zero Crossings | Zero-crossing count in analysis window |
+| `debug[2]` | Ring Amplitude | Peak-to-peak amplitude after first overshoot (deg/s) |
+| `debug[3]` | P Adjustment | Current cumulative P adjustment (signed) |
+| `debug[4]` | D Adjustment | Current cumulative D adjustment (signed) |
+| `debug[5]` | Window Active | Analysis window state (0=closed, 1=open) |
+| `debug[6]` | Autotune Phase | Current phase (0=Phase1, 1=Phase2, 2=Phase3, 3=Complete) |
+| `debug[7]` | Ring Assessment | Ringing assessment (0=well-damped, 1=mild, 2=ringing) |
+
+---
+
+## Files Modified for Phase 2
 
 | File | Modification | Status |
 |------|--------------|--------|
-| `src/main/target/common_pre.h` | Added `USE_FF_AUTOTUNE` | ✅ |
-| `src/main/fc/rc_modes.h` | Added `BOXFFAUTOTUNE` | ✅ |
-| `src/main/msp/msp_box.c` | Registered box mode (ID 56) | ✅ |
-| `src/main/pg/pg_ids.h` | Added `PG_FF_AUTOTUNE_CONFIG = 561` | ✅ |
-| `src/main/build/debug.h` | Added `DEBUG_FF_AUTOTUNE` | ✅ |
-| `src/main/build/debug.c` | Added debug mode name | ✅ |
-| `src/main/cli/settings.c` | Added 11 CLI parameters | ✅ |
-| `src/main/flight/pid.c` | Error-based D-term + update call | ✅ |
-| `mk/source.mk` | Added ff_autotune.c to build | ✅ |
+| `src/main/flight/ff_autotune.h` | Phase 2 enums, ringing assessment, new API functions | Done |
+| `src/main/flight/ff_autotune.c` | Ringing analysis, P/D adjustment, Phase 3 recheck (~1030 lines) | Done |
+| `src/main/pg/ff_autotune.h` | 12 new Phase 2 config fields | Done |
+| `src/main/pg/ff_autotune.c` | Phase 2 defaults, PG version bump (0->1) | Done |
+| `src/main/cli/settings.c` | 14 new CLI parameter entries | Done |
+| `src/main/build/debug.h` | Added `DEBUG_FF_AUTOTUNE_PD` enum | Done |
+| `src/main/build/debug.c` | Added `"FF_AUTOTUNE_PD"` debug mode name | Done |
+| `src/main/flight/pid.c` | P-term override (L1345-1349), D-term override (L1430-1434) | Done |
 
 ---
 
 ## Build Status
 
-| Target | Status | Size |
-|--------|--------|------|
-| BETAFPVG473 | ✅ Builds successfully | 1,037,854 bytes |
+| Target | Status | Notes |
+|--------|--------|-------|
+| BETAFPVG473 | Pending build test | Phase 2 code added, needs compilation |
 
 ---
 
-## Known Deviations from PRD
+## Known Deviations from Phase 2 PRD
 
-### Minor Implementation Differences
+1. **Ringing score scaling** - PRD specified "x10" but implementation uses raw `crossings * avgAmplitude` without explicit x10 since the amplitude is already in deg/s. Threshold values may need adjustment during flight test.
 
-1. **PRD suggested gain ranges** in table but implementation uses same values - ✅ Consistent
+2. **First overshoot skip** - PRD suggested skipping the "first peak" by value. Implementation uses zero-crossing detection: the first zero-crossing after window open transitions from "first peak" to "ringing" tracking. This is more robust against varying overshoot shapes.
 
-2. **Debug channel naming** - PRD used descriptive names, implementation uses indices 0-7 - ✅ Standard BF convention
+3. **Noise guard for D increase** (PRD section 6.5) - Not yet implemented. Deferred to flight test validation. If D increase causes audible motor noise, manual rollback via CLI is possible.
 
-3. **Window state machine** - Implementation has slightly different state names but same logic:
-   - PRD: IDLE → RISING → PEAK → FALLING → SETTLING → ADJUSTING
-   - Impl: Same sequence with minor flow differences
+4. **P safety floor** (PRD section 6.1) - The `p_adjust_max` parameter cap provides this implicitly. The effective P is `base_P + adjustment`, where adjustment is clamped to `[-p_adjust_max, 0]`.
 
 ---
 
 ## Next Steps
 
-### Ready for Flight Test
+### Phase 2 Flight Test
 
-1. **Flash firmware** to BETAFPVG473
-2. **Configure in CLI:**
-   ```
-   set ff_autotune_enabled = ON
-   set feedforward_roll = 0
-   set feedforward_pitch = 0
-   save
-   ```
-3. **Assign AUX switch** to "FF AUTOTUNE" mode
-4. **Test flight procedure:**
-   - Hover, arm autotune
-   - Perform aggressive maneuvers (30-60 sec)
-   - Disarm autotune (gains save automatically)
-   - Check learned values: `get ff_autotune_gain_roll`, `get ff_autotune_gain_pitch`
+See `TEST_PLAN_PHASE2.md` for the detailed test procedure.
 
-### Blackbox Analysis
+### Debug Reference
 
-Set `debug_mode = FF_AUTOTUNE` to see:
-- Real-time gain changes
-- Window detection
-- Bracket progression
-- Error measurements
-
----
-
-## Test Checklist
-
-- [ ] Mode activates/deactivates with AUX switch
-- [ ] Beeper sounds on activation
-- [ ] Beeper sounds on deactivation (when gains saved)
-- [ ] Gains save to EEPROM only on deactivation
-- [ ] Window detection works during maneuvers
-- [ ] Bracketing progresses toward convergence
-- [ ] Debug output visible in Blackbox
-- [ ] Error-based D-term active during tuning
-- [ ] Gains persist across power cycles
+See `DEBUG_PHASE2.md` for Blackbox analysis guide.
 
 ---
 
@@ -261,4 +204,5 @@ Set `debug_mode = FF_AUTOTUNE` to see:
 
 | Date | Version | Changes |
 |------|---------|---------|
-| 2026-02-05 | 1.0 | Initial progress document - implementation complete |
+| 2026-02-05 | 1.0 | Initial progress document - Phase 1 implementation complete |
+| 2026-02-07 | 2.0 | Phase 2 P/D ratio tuning implementation complete |

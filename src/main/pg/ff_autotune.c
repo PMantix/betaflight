@@ -22,20 +22,34 @@
 #include "pg/pg_ids.h"
 #include "pg/ff_autotune.h"
 
-PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 0);
+PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 1);
 
 PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
+    // Phase 1: F-term tuning
     .enabled = 0,
     .setpoint_low = 100,        // 100 deg/s
     .setpoint_high = 600,       // 600 deg/s
-    .min_accel = 100,           // 100 × 100 = 10000 deg/s²
+    .min_accel = 100,           // 100 x 100 = 10000 deg/s^2
     .gain_step = 5,             // Step size for searching
     .gain_max = 200,            // Max gain limit
     .gain_min = 0,              // Min gain limit
     .error_deadband = 10,       // 10 deg/s deadband
-    .converge_threshold = 3,    // Converge when bracket ≤ 3
+    .converge_threshold = 3,    // Converge when bracket <= 3
     .gain_roll = 0,             // Start with no FF
     .gain_pitch = 0,            // Start with no FF
+    // Phase 2: P/D ratio tuning
+    .pd_enabled = 1,            // Enabled by default (requires Phase 1 convergence)
+    .ring_window_ms = 150,      // 150ms analysis window
+    .ring_threshold = 20,       // Ringing score threshold
+    .ring_deadband = 5,         // 5 deg/s zero-crossing deadband
+    .p_step = 2,                // P adjustment step
+    .d_step = 1,                // D adjustment step (Phase 2b)
+    .p_adjust_max = 10,         // Max cumulative P reduction
+    .d_adjust_max = 5,          // Max cumulative D increase
+    .p_adj_roll = 0,            // No initial P adjustment
+    .p_adj_pitch = 0,           // No initial P adjustment
+    .d_adj_roll = 0,            // No initial D adjustment
+    .d_adj_pitch = 0,           // No initial D adjustment
 );
 
 #endif // USE_FF_AUTOTUNE

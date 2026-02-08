@@ -75,6 +75,10 @@
 #include "flight/rpm_filter.h"
 #include "flight/servos.h"
 
+#ifdef USE_FF_AUTOTUNE
+#include "flight/ff_autotune.h"
+#endif
+
 #include "io/beeper.h"
 #include "io/gps.h"
 #include "io/pidaudio.h"
@@ -524,6 +528,10 @@ void disarm(flightLogDisarmReason_e reason)
         if (!crashFlipModeActive) {
             statsOnDisarm();
         }
+#endif
+
+#ifdef USE_FF_AUTOTUNE
+        ffAutotuneOnDisarm();
 #endif
     // Terminate crashflip mode in any disarm
     if (crashFlipModeActive) {

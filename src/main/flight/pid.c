@@ -1342,6 +1342,14 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 
         // -----calculate P component
         pidData[axis].P = pidRuntime.pidCoefficient[axis].Kp * errorRate * getTpaFactor(pidProfile, axis, TERM_P);
+#ifdef USE_FF_AUTOTUNE
+        if (ffAutotuneHasLearnedGains() && axis <= FD_PITCH) {
+            int16_t pAdj = ffAutotuneGetPAdjustment(axis);
+            if (pAdj != 0) {
+                pidData[axis].P += PTERM_SCALE * pAdj * errorRate * getTpaFactor(pidProfile, axis, TERM_P);
+            }
+        }
+#endif
         if (axis == FD_YAW) {
             pidData[axis].P = pidRuntime.ptermYawLowpassApplyFn((filter_t *) &pidRuntime.ptermYawLowpass, pidData[axis].P);
         }
@@ -1422,6 +1430,11 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
             delta = - (gyroRateDterm[axis] - previousGyroRateDterm[axis]) * pidRuntime.pidFrequency;
 #endif
             float preTpaD = pidRuntime.pidCoefficient[axis].Kd * delta;
+#ifdef USE_FF_AUTOTUNE
+            if (ffAutotuneIsPhase2Active() && axis <= FD_PITCH) {
+                preTpaD += DTERM_SCALE * (ffAutotuneGetDAdjustment(axis) * 0.01f) * delta;
+            }
+#endif
 
 #if defined(USE_ACC)
             if (cmpTimeUs(currentTimeUs, levelModeStartTimeUs) > CRASH_RECOVERY_DETECTION_DELAY_US) {
@@ -1455,6 +1468,15 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 
             pidData[axis].D = preTpaD * getTpaFactor(pidProfile, axis, TERM_D);
 
+#ifdef USE_FF_AUTOTUNE
+            if (ffAutotuneHasLearnedGains() && axis <= FD_PITCH) {
+                int16_t dAdj = ffAutotuneGetDAdjustment(axis);
+                if (dAdj != 0) {
+                    pidData[axis].D += DTERM_SCALE * dAdj * delta * getTpaFactor(pidProfile, axis, TERM_D);
+                }
+            }
+#endif
+
             // Log the value of D pre application of TPA
             if (axis != FD_YAW) {
                 DEBUG_SET(DEBUG_D_LPF, axis - FD_ROLL + 2, lrintf(preTpaD * D_LPF_PRE_TPA_SCALE));
@@ -1479,8 +1501,8 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         float feedforwardGain = launchControlActive ? 0.0f : pidRuntime.pidCoefficient[axis].Kf;
         
 #ifdef USE_FF_AUTOTUNE
-        // When FF autotune is active, override feedforward gain with learned value
-        if (ffAutotuneIsActive() && axis <= FD_PITCH) {
+        // Override feedforward gain with learned value (persists after mode-off until disarm)
+        if (ffAutotuneHasLearnedGains() && axis <= FD_PITCH) {
             feedforwardGain = FEEDFORWARD_SCALE * (ffAutotuneGetGain(axis) * 0.01f);
         }
 #endif

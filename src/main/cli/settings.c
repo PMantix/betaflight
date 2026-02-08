@@ -2077,6 +2077,19 @@ const clivalue_t valueTable[] = {
     { "ff_autotune_converge_threshold", VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, converge_threshold) },
     { "ff_autotune_gain_roll",          VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 255 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_roll) },
     { "ff_autotune_gain_pitch",         VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0, 255 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_pitch) },
+    // Phase 2: P/D ratio tuning
+    { "ff_autotune_pd_enabled",         VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_OFF_ON }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, pd_enabled) },
+    { "ff_autotune_ring_window_ms",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 50, 250 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, ring_window_ms) },
+    { "ff_autotune_ring_threshold",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 100 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, ring_threshold) },
+    { "ff_autotune_ring_deadband",      VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 2, 20 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, ring_deadband) },
+    { "ff_autotune_p_step",             VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 5 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, p_step) },
+    { "ff_autotune_d_step",             VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 3 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_step) },
+    { "ff_autotune_p_adjust_max",       VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 2, 20 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, p_adjust_max) },
+    { "ff_autotune_d_adjust_max",       VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_adjust_max) },
+    { "ff_autotune_p_adj_roll",         VAR_INT8   | MASTER_VALUE, .config.minmax = { -20, 0 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, p_adj_roll) },
+    { "ff_autotune_p_adj_pitch",        VAR_INT8   | MASTER_VALUE, .config.minmax = { -20, 0 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, p_adj_pitch) },
+    { "ff_autotune_d_adj_roll",         VAR_INT8   | MASTER_VALUE, .config.minmax = { 0, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_adj_roll) },
+    { "ff_autotune_d_adj_pitch",        VAR_INT8   | MASTER_VALUE, .config.minmax = { 0, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_adj_pitch) },
 #endif
 };
 

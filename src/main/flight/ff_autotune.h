@@ -44,11 +44,33 @@ typedef enum {
     FF_ASSESS_LEAD = 1        // Gyro leading/overshoot (need less FF)
 } ffAssessment_e;
 
+// Autotune phase (per-axis)
+typedef enum {
+    FF_AUTOTUNE_PHASE1_FF = 0,    // Tuning feedforward gain
+    FF_AUTOTUNE_PHASE2_PD,        // Tuning P/D ratio for ringing suppression
+    FF_AUTOTUNE_PHASE3_RECHECK,   // F-term spot check after P/D changes
+    FF_AUTOTUNE_COMPLETE           // All phases converged
+} ffAutotunePhase_e;
+
+// Ringing assessment
+typedef enum {
+    FF_RING_WELL_DAMPED = 0,  // No adjustment needed
+    FF_RING_MILD,             // Borderline ringing
+    FF_RING_RINGING           // Needs P/D adjustment
+} ffRingAssessment_e;
+
 void ffAutotuneInit(void);
 void ffAutotuneUpdate(int axis, float setpoint, float gyroRate, float setpointDelta, timeUs_t currentTimeUs);
 
 bool ffAutotuneIsActive(void);
+bool ffAutotuneHasLearnedGains(void);
 uint8_t ffAutotuneGetGain(int axis);
 bool ffAutotuneNeedsSave(void);
 void ffAutotuneSaveGains(void);
+void ffAutotuneOnDisarm(void);
 void ffAutotuneReset(void);
+
+// Phase 2 API
+bool ffAutotuneIsPhase2Active(void);
+int16_t ffAutotuneGetPAdjustment(int axis);
+int16_t ffAutotuneGetDAdjustment(int axis);
