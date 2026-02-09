@@ -2090,6 +2090,12 @@ const clivalue_t valueTable[] = {
     { "ff_autotune_p_adj_pitch",        VAR_INT8   | MASTER_VALUE, .config.minmax = { -20, 0 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, p_adj_pitch) },
     { "ff_autotune_d_adj_roll",         VAR_INT8   | MASTER_VALUE, .config.minmax = { 0, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_adj_roll) },
     { "ff_autotune_d_adj_pitch",        VAR_INT8   | MASTER_VALUE, .config.minmax = { 0, 10 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_adj_pitch) },
+    // Phase 2b: P/D scale-down for noise reduction
+    { "ff_autotune_noise_threshold",    VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 5, 30 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, noise_threshold) },
+    { "ff_autotune_scale_step",         VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 1, 3 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, scale_step) },
+    { "ff_autotune_scale_max",          VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 2, 15 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, scale_max) },
+    { "ff_autotune_scale_adj_roll",     VAR_INT8   | MASTER_VALUE, .config.minmax = { -15, 0 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, scale_adj_roll) },
+    { "ff_autotune_scale_adj_pitch",    VAR_INT8   | MASTER_VALUE, .config.minmax = { -15, 0 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, scale_adj_pitch) },
 #endif
 };
 

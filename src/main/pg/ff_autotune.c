@@ -22,7 +22,7 @@
 #include "pg/pg_ids.h"
 #include "pg/ff_autotune.h"
 
-PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 1);
+PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 4);
 
 PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     // Phase 1: F-term tuning
@@ -44,12 +44,18 @@ PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     .ring_deadband = 5,         // 5 deg/s zero-crossing deadband
     .p_step = 2,                // P adjustment step
     .d_step = 1,                // D adjustment step (Phase 2b)
-    .p_adjust_max = 10,         // Max cumulative P reduction
-    .d_adjust_max = 5,          // Max cumulative D increase
+    .p_adjust_max = 20,         // Max cumulative P reduction
+    .d_adjust_max = 10,         // Max cumulative D increase
     .p_adj_roll = 0,            // No initial P adjustment
     .p_adj_pitch = 0,           // No initial P adjustment
     .d_adj_roll = 0,            // No initial D adjustment
     .d_adj_pitch = 0,           // No initial D adjustment
+    // Phase 2b: P/D scale-down for noise reduction
+    .noise_threshold = 10,      // 10% noise improvement threshold to continue
+    .scale_step = 1,            // 1 unit step per iteration
+    .scale_max = 15,            // Max 15 units cumulative scale-down
+    .scale_adj_roll = 0,        // No initial scale adjustment
+    .scale_adj_pitch = 0,       // No initial scale adjustment
 );
 
 #endif // USE_FF_AUTOTUNE

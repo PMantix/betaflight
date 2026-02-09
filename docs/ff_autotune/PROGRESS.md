@@ -1,6 +1,6 @@
 # FF Autotune v3 Implementation Progress
 
-> **Last Updated:** 2026-02-07
+> **Last Updated:** 2026-02-08
 > **Branch:** `ff-autotune-v1`
 > **Commits:** `dc39e2eea` (PRD), `78ae93515` (Phase 1 Implementation)
 
@@ -14,12 +14,13 @@
 | Phase 1 CLI Parameters | 11 | 11 | Complete |
 | Phase 1 Debug Channels | 8 | 8 | Complete |
 | Phase 2 Functional Requirements | 6 | 6 | Complete |
-| Phase 2 CLI Parameters | 14 | 14 | Complete |
+| Phase 2 CLI Parameters | 13 | 13 | Complete |
 | Phase 2 Debug Channels | 8 | 8 | Complete |
 | New Files | 4 | 4 | Complete |
 | Modified Files | 9 | 9 | Complete |
+| Bug Fixes | 2 | 2 | Complete |
 
-**Overall Status: PHASE 2 IMPLEMENTATION COMPLETE - READY FOR FLIGHT TEST**
+**Overall Status: PHASE 2 IMPLEMENTATION COMPLETE + BUG FIXES APPLIED - READY FOR FLIGHT TEST**
 
 ---
 
@@ -67,11 +68,11 @@
 | Window closes on duration expiry or state transition | Done | Timer check in `updateAxisTracking()` + close in WAITING->IDLE |
 | Signed error tracking (gyro - setpoint) | Done | `signedError = gyroRate - setpoint` |
 
-### FR10: Ringing Detection - COMPLETE
+### FR10: Ringing Detection - COMPLETE (Schmitt Trigger Fix Applied)
 
 | Requirement | Status | Implementation |
 |-------------|--------|----------------|
-| Zero-crossing count with deadband | Done | `ringWindowAccumulate()` with `ring_deadband` filtering |
+| Zero-crossing count with deadband | Done | `ringWindowAccumulate()` with **Schmitt trigger hysteresis** (see Bug Fix #1 below) |
 | Skip first overshoot peak | Done | `ringFirstPeakPassed` flag, first crossing marks transition |
 | Peak-to-peak amplitude after first peak | Done | `ringPeakPos - ringPeakNeg` tracked after first peak |
 | Combined ringing score (crossings x avg amplitude) | Done | `ringWindowClose()` computes score |
@@ -119,6 +120,8 @@
 
 ## Phase 2 CLI Parameters
 
+### Phase 2a: P/D Balance (Ringing)
+
 | Parameter | Default | Range | Status |
 |-----------|---------|-------|--------|
 | `ff_autotune_pd_enabled` | ON | OFF/ON | Done |
@@ -134,22 +137,44 @@
 | `ff_autotune_d_adj_roll` | 0 | 0..10 | Done |
 | `ff_autotune_d_adj_pitch` | 0 | 0..10 | Done |
 
+### Phase 2b: P/D Scale-Down (Noise)
+
+| Parameter | Default | Range | Status |
+|-----------|---------|-------|--------|
+| `ff_autotune_noise_threshold` | 10 | 5-30 | Done |
+| `ff_autotune_scale_step` | 1 | 1-3 | Done |
+| `ff_autotune_scale_max` | 8 | 2-15 | Done |
+| `ff_autotune_scale_adj_roll` | 0 | -15..0 | Done |
+| `ff_autotune_scale_adj_pitch` | 0 | -15..0 | Done |
+
+> **Note:** `ff_autotune_noise_window_ms` was removed in v3. Noise is now measured during the RISING phase (|D-term| accumulation) rather than a separate post-maneuver window.
+
 ---
 
-## Phase 2 Debug Channels
+## Debug Channels
 
-Debug mode: `DEBUG_FF_AUTOTUNE_PD`
+Debug mode: `DEBUG_FF_AUTOTUNE` (single consolidated mode for all phases)
+
+### Universal Channels (always valid)
 
 | Channel | Name | Description |
 |---------|------|-------------|
-| `debug[0]` | Ringing Score | Combined ringing score from last maneuver |
-| `debug[1]` | Zero Crossings | Zero-crossing count in analysis window |
-| `debug[2]` | Ring Amplitude | Peak-to-peak amplitude after first overshoot (deg/s) |
-| `debug[3]` | P Adjustment | Current cumulative P adjustment (signed) |
-| `debug[4]` | D Adjustment | Current cumulative D adjustment (signed) |
-| `debug[5]` | Window Active | Analysis window state (0=closed, 1=open) |
-| `debug[6]` | Autotune Phase | Current phase (0=Phase1, 1=Phase2, 2=Phase3, 3=Complete) |
-| `debug[7]` | Ring Assessment | Ringing assessment (0=well-damped, 1=mild, 2=ringing) |
+| `debug[0]` | Gain | Current FF gain (0-200) |
+| `debug[1]` | Tracking Error | Instantaneous `fabsf(gyroRate) - fabsf(setpoint)` |
+| `debug[2]` | Window State | 0=IDLE, 1=RISING, 2=ADJUSTING, 3=WAITING |
+| `debug[3]` | Phase | 0=Phase1_FF, 1=Phase2_PD, 2=Phase2b_Scale, 3=Phase3_Recheck, 4=Complete |
+
+### Phase-Multiplexed Channels (meaning depends on debug[3])
+
+| debug[3] | debug[4] | debug[5] | debug[6] | debug[7] |
+|----------|----------|----------|----------|----------|
+| 0 (FF) | lastAvgError | bracketState | lastAssessment | historyCount |
+| 1 (PD) | ringingScore | pAdjustment | dAdjustment | ringAssessment |
+| 2 (Scale) | noiseScore | scaleAdjustment | noiseBaseline | noiseAssessment |
+| 3 (Recheck) | recheckStatus | errorDrift | 0 | 0 |
+| 4 (Complete) | 0 | 0 | 0 | 0 |
+
+See `DEBUG_PHASE2.md` for full details.
 
 ---
 
@@ -157,14 +182,12 @@ Debug mode: `DEBUG_FF_AUTOTUNE_PD`
 
 | File | Modification | Status |
 |------|--------------|--------|
-| `src/main/flight/ff_autotune.h` | Phase 2 enums, ringing assessment, new API functions | Done |
-| `src/main/flight/ff_autotune.c` | Ringing analysis, P/D adjustment, Phase 3 recheck (~1030 lines) | Done |
-| `src/main/pg/ff_autotune.h` | 12 new Phase 2 config fields | Done |
-| `src/main/pg/ff_autotune.c` | Phase 2 defaults, PG version bump (0->1) | Done |
-| `src/main/cli/settings.c` | 14 new CLI parameter entries | Done |
-| `src/main/build/debug.h` | Added `DEBUG_FF_AUTOTUNE_PD` enum | Done |
-| `src/main/build/debug.c` | Added `"FF_AUTOTUNE_PD"` debug mode name | Done |
-| `src/main/flight/pid.c` | P-term override (L1345-1349), D-term override (L1430-1434) | Done |
+| `src/main/flight/ff_autotune.h` | Phase 2 enums (incl. Phase2b, noise assessment), ringing assessment, new API functions | Done |
+| `src/main/flight/ff_autotune.c` | Ringing analysis (Schmitt trigger), P/D adjustment, Phase 2b noise scale-down, Phase 3 recheck (~1219 lines) | Done |
+| `src/main/pg/ff_autotune.h` | Phase 2a + 2b config fields (ringing, noise, scale) | Done |
+| `src/main/pg/ff_autotune.c` | Phase 2 defaults, PG version 3 | Done |
+| `src/main/cli/settings.c` | Phase 2a + 2b CLI parameter entries | Done |
+| `src/main/flight/pid.c` | P-term override, D-term override, scale adjustment additive | Done |
 
 ---
 
@@ -172,7 +195,27 @@ Debug mode: `DEBUG_FF_AUTOTUNE_PD`
 
 | Target | Status | Notes |
 |--------|--------|-------|
-| BETAFPVG473 | Pending build test | Phase 2 code added, needs compilation |
+| BETAFPVG473 | **PASS** | Clean build, 73.5% FLASH1 usage. Verified 2026-02-08 |
+
+---
+
+## Bug Fixes (2026-02-08)
+
+### Bug Fix #1: Schmitt Trigger Zero-Crossing Detection
+
+**Problem:** The original zero-crossing detection in `ringWindowAccumulate()` compared consecutive sample values against the deadband: `prevPositive = (prevError > deadband)` and `currNegative = (error < -deadband)`. A continuous signal transitions gradually through the deadband zone (e.g., +6 → +3 → 0 → -3 → -6), so by the time the current sample reaches `-deadband`, the previous sample is already in the dead zone — not above `+deadband`. Every single zero-crossing was invisible.
+
+**Evidence:** V4 flight log showed Phase 2a ran 11 maneuvers with **zero** ringing scores despite gyro visibly oscillating with up to 25 raw zero-crossings per maneuver.
+
+**Fix:** Replaced with Schmitt trigger (hysteresis latch). A new `int8_t ringLastSide` field remembers which side of the deadband the signal was last on. A crossing is only counted when the signal reaches the opposite threshold. Inside the deadband, `ringLastSide` retains its value.
+
+**Result:** Same v4 log data now correctly shows 8 of 11 maneuvers as RINGING (scores 30-590), matching what's visible in the blackbox viewer.
+
+### Bug Fix #2: Phase 2b Noise Measurement During RISING
+
+**Problem:** Original Phase 2b measured |D-term| in a separate post-maneuver window (`noise_window_ms`). This measured D-term doing its job (damping after the rise) rather than the noise we want to reduce.
+
+**Fix:** Removed `noise_window_ms` parameter. Phase 2b now accumulates `fabsf(pidData[axis].D)` during the RISING phase alongside the tracking error. Processed at the RISING→ADJUSTING transition.
 
 ---
 
@@ -180,19 +223,35 @@ Debug mode: `DEBUG_FF_AUTOTUNE_PD`
 
 1. **Ringing score scaling** - PRD specified "x10" but implementation uses raw `crossings * avgAmplitude` without explicit x10 since the amplitude is already in deg/s. Threshold values may need adjustment during flight test.
 
-2. **First overshoot skip** - PRD suggested skipping the "first peak" by value. Implementation uses zero-crossing detection: the first zero-crossing after window open transitions from "first peak" to "ringing" tracking. This is more robust against varying overshoot shapes.
+2. **First overshoot skip** - PRD suggested skipping the "first peak" by value. Implementation uses Schmitt trigger zero-crossing detection: the first crossing after window open transitions from "first peak" to "ringing" tracking. This is more robust against varying overshoot shapes.
 
 3. **Noise guard for D increase** (PRD section 6.5) - Not yet implemented. Deferred to flight test validation. If D increase causes audible motor noise, manual rollback via CLI is possible.
 
 4. **P safety floor** (PRD section 6.1) - The `p_adjust_max` parameter cap provides this implicitly. The effective P is `base_P + adjustment`, where adjustment is clamped to `[-p_adjust_max, 0]`.
 
+5. **Phase 2b noise measurement** - PRD specified a separate post-maneuver window. Implementation measures during RISING instead, which better captures the D-term noise during dynamic conditions rather than the D-term's damping action.
+
+---
+
+## Flight Test Results
+
+### V4 Test Flight 1 (2026-02-08, pre-Schmitt-fix firmware)
+
+- Phase 1: 33.2s, 16 maneuvers, FF gain converged 0→38→43→40
+- Phase 2a: 18.8s, 11 maneuvers, **zero** P/D adjustments (zero-crossing bug)
+- Did not reach Phase 2b or Phase 3
+- Total flight: 51.9s, 27 maneuvers
+
+> Firmware with Schmitt trigger fix has been built but not yet flight-tested.
+
 ---
 
 ## Next Steps
 
-### Phase 2 Flight Test
-
-See `TEST_PLAN_PHASE2.md` for the detailed test procedure.
+1. **Flight test with Schmitt trigger fix** - Phase 2a should now detect ringing and begin P adjustment
+2. **Validate Phase 2b noise reduction** - Confirm |D-term| during RISING correlates with perceived noise
+3. **Tune default thresholds** - `ring_threshold=20` may need adjustment based on real ringing scores
+4. **Concurrent assessment redesign** - Future: measure all aspects (FF, ringing, noise) on every maneuver and adjust the worst aspect first, instead of sequential phases
 
 ### Debug Reference
 

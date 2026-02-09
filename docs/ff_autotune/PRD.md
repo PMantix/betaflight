@@ -108,33 +108,45 @@ Rationale:
 
 ### FR7: Debug Output
 
-Use DEBUG_FF_AUTOTUNE mode with persistent, meaningful channels for blackbox analysis.
+Use `DEBUG_FF_AUTOTUNE` mode with persistent, meaningful channels for blackbox analysis. All phases (Phase 1, 2a, 2b, 3) share this single debug mode. Channels 0-3 are universal; channels 4-7 are phase-multiplexed based on `debug[3]`.
 
-**Debug Channels (per debug axis):**
+**Debug Channels (universal):**
 
 | Channel | Name | Description | Units |
 |---------|------|-------------|-------|
-| 0 | `gain` | Current FF gain for this axis | 0-255 |
-| 1 | `tracking_error` | Instantaneous (gyro - setpoint) | deg/s |
-| 2 | `window_state` | Tracking window state machine | enum |
-| 3 | `assessment` | Current assessment: -1=lag, 0=optimal, +1=lead | signed |
-| 4 | `avg_error` | Average error from last completed maneuver | deg/s × 10 |
-| 5 | `maneuver_samples` | Sample count in current/last maneuver | count |
-| 6 | `history_idx` | Current position in history ring buffer | 0-7 |
-| 7 | `bracket_state` | Bracketing state: 0=searching, 1=bracketed, 2=converged | enum |
+| 0 | `gain` | Current FF gain for this axis | 0-200 |
+| 1 | `tracking_error` | Instantaneous `fabsf(gyro) - fabsf(setpoint)` | deg/s |
+| 2 | `window_state` | Maneuver state machine | enum (see below) |
+| 3 | `phase` | Current autotune phase | enum (see below) |
+
+**Debug Channels (Phase 1 specific, when debug[3] = 0):**
+
+| Channel | Name | Description | Units |
+|---------|------|-------------|-------|
+| 4 | `avg_error` | Average error x10 from last completed maneuver | deg/s × 10 |
+| 5 | `bracket_state` | Bracketing state: 0=searching, 1=bracketed, 2=converged | enum |
+| 6 | `assessment` | Last assessment: -1=lag, 0=optimal, +1=lead | signed |
+| 7 | `history_count` | Number of entries in the history ring buffer | 0-8 |
+
+> See `DEBUG_PHASE2.md` for Phase 2a/2b/3 channel layouts.
 
 **Window State Values (channel 2):**
 - 0 = IDLE (setpoint below threshold)
-- 1 = RISING (in tracking window, acceleration positive)
-- 2 = PEAK (in window, acceleration slowing)
-- 3 = FALLING (exiting window)
-- 4 = SETTLING (post-maneuver settle time)
-- 5 = ADJUSTING (applying gain change)
+- 1 = RISING (in tracking window, setpoint increasing)
+- 2 = ADJUSTING (rise ended, processing delay)
+- 3 = WAITING (waiting for stick to return to center)
 
-**Assessment Values (channel 3):**
-- -100 to -1 = LAG (gyro behind setpoint, need more FF)
+**Phase Values (channel 3):**
+- 0 = PHASE1_FF (F-term tuning)
+- 1 = PHASE2_PD (P/D balance via ringing)
+- 2 = PHASE2B_SCALE (P/D scale-down via noise)
+- 3 = PHASE3_RECHECK (F-term spot check)
+- 4 = COMPLETE (all phases converged)
+
+**Assessment Values (channel 6, during Phase 1):**
+- -1 = LAG (gyro behind setpoint, need more FF)
 - 0 = OPTIMAL (within deadband)
-- +1 to +100 = LEAD (gyro ahead/overshoot, need less FF)
+- +1 = LEAD (gyro ahead/overshoot, need less FF)
 
 This allows seeing in blackbox exactly when tracking windows are detected, the real-time assessment, and how the system is converging.
 
@@ -415,3 +427,4 @@ save
 | Date | Version | Author | Changes |
 |------|---------|--------|---------|
 | 2026-02-05 | 3.0 | PMantix | Initial PRD for tracking-based FF autotune |
+| 2026-02-08 | 3.1 | PMantix + Claude | Updated debug channels to match implementation: 4-state window machine, phase-multiplexed channels 4-7, single FF_AUTOTUNE debug mode. Added Phase 2/2b/3 phase values. |

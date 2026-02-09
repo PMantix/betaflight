@@ -46,6 +46,13 @@ typedef struct ffAutotuneConfig_s {
     int8_t   p_adj_pitch;       // Learned Pitch P adjustment (persisted)
     int8_t   d_adj_roll;        // Learned Roll D adjustment (persisted)
     int8_t   d_adj_pitch;       // Learned Pitch D adjustment (persisted)
+
+    // Phase 2b: P/D scale-down for noise reduction
+    uint8_t  noise_threshold;   // Noise score improvement threshold (%) to continue reducing
+    uint8_t  scale_step;        // P/D uniform scale-down step per iteration
+    uint8_t  scale_max;         // Maximum cumulative P/D scale-down
+    int8_t   scale_adj_roll;    // Learned roll scale adjustment (persisted)
+    int8_t   scale_adj_pitch;   // Learned pitch scale adjustment (persisted)
 } ffAutotuneConfig_t;
 
 PG_DECLARE(ffAutotuneConfig_t, ffAutotuneConfig);

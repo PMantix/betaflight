@@ -1314,6 +1314,9 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
 #ifdef USE_CHIRP
         currentPidSetpoint += currentChirp;
 #endif // USE_CHIRP
+#ifdef USE_FF_AUTOTUNE
+        currentPidSetpoint += ffAutotuneGetWiggleOffset(axis);
+#endif // USE_FF_AUTOTUNE
         float errorRate = currentPidSetpoint - gyroRate; // r - y
 #if defined(USE_ACC)
         handleCrashRecovery(

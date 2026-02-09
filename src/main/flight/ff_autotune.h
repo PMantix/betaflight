@@ -47,9 +47,9 @@ typedef enum {
 // Autotune phase (per-axis)
 typedef enum {
     FF_AUTOTUNE_PHASE1_FF = 0,    // Tuning feedforward gain
-    FF_AUTOTUNE_PHASE2_PD,        // Tuning P/D ratio for ringing suppression
-    FF_AUTOTUNE_PHASE3_RECHECK,   // F-term spot check after P/D changes
-    FF_AUTOTUNE_COMPLETE           // All phases converged
+    FF_AUTOTUNE_PHASE2_PD,        // 2a: Tuning P/D ratio for ringing suppression
+    FF_AUTOTUNE_PHASE2B_SCALE,    // 2b: P/D scale-down for noise reduction
+    FF_AUTOTUNE_COMPLETE           // All metrics converged
 } ffAutotunePhase_e;
 
 // Ringing assessment
@@ -58,6 +58,13 @@ typedef enum {
     FF_RING_MILD,             // Borderline ringing
     FF_RING_RINGING           // Needs P/D adjustment
 } ffRingAssessment_e;
+
+// Noise assessment (Phase 2b)
+typedef enum {
+    FF_NOISE_HIGH = 0,        // Noise still high, continue reducing
+    FF_NOISE_ACCEPTABLE,      // Noise acceptable, stop
+    FF_NOISE_MINIMAL          // Noise negligible
+} ffNoiseAssessment_e;
 
 void ffAutotuneInit(void);
 void ffAutotuneUpdate(int axis, float setpoint, float gyroRate, float setpointDelta, timeUs_t currentTimeUs);
@@ -74,3 +81,6 @@ void ffAutotuneReset(void);
 bool ffAutotuneIsPhase2Active(void);
 int16_t ffAutotuneGetPAdjustment(int axis);
 int16_t ffAutotuneGetDAdjustment(int axis);
+
+// COMPLETE notification wiggle offset (added to setpoint in pid.c)
+float ffAutotuneGetWiggleOffset(int axis);

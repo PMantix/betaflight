@@ -77,22 +77,28 @@ This region is highly repeatable across maneuvers because:
 
 Rather than a single number, we compute a **ringing score** that captures both the amplitude and frequency of oscillation in the analysis window.
 
-#### 1. Zero-Crossing Count
+#### 1. Zero-Crossing Count (Schmitt Trigger)
 
 Count the number of times the tracking error `(gyroRate - setpoint)` crosses zero during the analysis window, **excluding the first crossing** (the initial overshoot settling).
+
+Zero-crossing detection uses a **Schmitt trigger** with `ring_deadband` as the hysteresis threshold. An `int8_t ringLastSide` field remembers which side of the deadband the signal was last on:
+
+- When `error > +deadband`: latch `ringLastSide = +1`
+- When `error < -deadband`: latch `ringLastSide = -1`  
+- When `-deadband <= error <= +deadband`: `ringLastSide` retains its previous value (no crossing counted)
+
+A crossing is registered only when `ringLastSide` changes from its previous value (i.e., signal went from above `+deadband` to below `-deadband` or vice versa).
 
 ```
 error signal in plateau window:
      +  ╲    ╱╲    ╱╲
-  0 ──────╳────╳────╳────╳──────
-     -     ╲╱    ╲╱    ╲╱
+  +db ----╲--╱--╲--╱--╲------  (latch side=+1)
+  0 ──────╳────╳────╳────╳─  (crossings after 1st: 4)
+  -db ------╲╱----╲╱----╲╱--  (latch side=-1)
+     -
 
-     → 6 zero-crossings = significant ringing
+     → 4 zero-crossings = significant ringing
 ```
-
-- 0-1 zero-crossings: well-damped (no ringing)
-- 2-3 zero-crossings: mild ringing (borderline)
-- 4+ zero-crossings: significant ringing (needs adjustment)
 
 #### 2. Peak-to-Peak Amplitude
 
@@ -188,7 +194,8 @@ When we decrease P, we risk making the system too slow to respond. We detect thi
 ```c
 typedef enum {
     FF_AUTOTUNE_PHASE1_FF = 0,    // Tuning feedforward gain
-    FF_AUTOTUNE_PHASE2_PD,        // Tuning P/D ratio for ringing suppression
+    FF_AUTOTUNE_PHASE2_PD,        // Phase 2a: P/D ratio for ringing suppression
+    FF_AUTOTUNE_PHASE2B_SCALE,    // Phase 2b: Uniform P+D scale-down for noise
     FF_AUTOTUNE_PHASE3_RECHECK,   // F-term spot check after P/D changes
     FF_AUTOTUNE_COMPLETE           // All phases converged
 } ffAutotunePhase_e;
@@ -207,15 +214,21 @@ typedef struct {
     float ringPeakNeg;              // Max negative error in window
     uint16_t ringZeroCrossings;     // Zero-crossing count in window
     uint16_t ringSampleCount;       // Samples in current analysis window
-    float ringPrevError;            // Previous error for zero-crossing detection
+    int8_t ringLastSide;            // Schmitt trigger: +1 = above +deadband, -1 = below -deadband, 0 = unknown
     bool ringFirstPeakPassed;       // Have we passed the first overshoot?
     bool ringWindowActive;          // Currently in analysis window
     timeUs_t ringWindowStartTime;   // When analysis window opened
 
+    // Noise measurement (Phase 2b, accumulated during RISING)
+    float noiseAccumulator;         // Sum of |D-term| during RISING
+    uint16_t noiseSampleCount;      // Sample count during RISING
+    float noiseBaseline;            // Baseline noise score (first measurement)
+    int16_t scaleAdjustment;        // Cumulative uniform P+D scale-down
+
     // P/D adjustment state
     int16_t pAdjustment;            // Cumulative P adjustment (negative = decreased)
     int16_t dAdjustment;            // Cumulative D adjustment (positive = increased)
-    bool adjustingD;                // Currently in Phase 2b (D adjustment)
+    bool adjustingD;                // Currently in D adjustment fallback
 
     // Ringing history for bracketing
     ffRingHistoryEntry_t ringHistory[FF_AUTOTUNE_HISTORY_SIZE];
@@ -295,14 +308,16 @@ During the ringing analysis window, we have access to:
 
 ## Configuration Parameters (New)
 
+### Phase 2a: P/D Balance (Ringing)
+
 | Parameter | Type | Default | Range | Description |
 |-----------|------|---------|-------|-------------|
 | `ff_autotune_pd_enabled` | bool | ON | OFF/ON | Enable Phase 2 P/D tuning (requires Phase 1 also enabled) |
 | `ff_autotune_ring_window_ms` | uint8 | 150 | 50-250 | Duration of ringing analysis window after rise ends (ms) |
 | `ff_autotune_ring_threshold` | uint8 | 20 | 5-100 | Ringing score above which adjustment is triggered |
-| `ff_autotune_ring_deadband` | uint8 | 5 | 2-20 | Error deadband for zero-crossing detection (deg/s) |
+| `ff_autotune_ring_deadband` | uint8 | 5 | 2-20 | Schmitt trigger deadband for zero-crossing detection (deg/s) |
 | `ff_autotune_p_step` | uint8 | 2 | 1-5 | P-term adjustment step size per maneuver |
-| `ff_autotune_d_step` | uint8 | 1 | 1-3 | D-term adjustment step size (Phase 2b) |
+| `ff_autotune_d_step` | uint8 | 1 | 1-3 | D-term adjustment step size (fallback in Phase 2a) |
 | `ff_autotune_p_adjust_max` | uint8 | 10 | 2-20 | Maximum cumulative P reduction |
 | `ff_autotune_d_adjust_max` | uint8 | 5 | 1-10 | Maximum cumulative D increase |
 | `ff_autotune_p_adj_roll` | int8 | 0 | -20..0 | Learned Roll P adjustment (persisted) |
@@ -310,22 +325,25 @@ During the ringing analysis window, we have access to:
 | `ff_autotune_d_adj_roll` | int8 | 0 | 0..10 | Learned Roll D adjustment (persisted) |
 | `ff_autotune_d_adj_pitch` | int8 | 0 | 0..10 | Learned Pitch D adjustment (persisted) |
 
+### Phase 2b: P/D Scale-Down (Noise)
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `ff_autotune_noise_threshold` | uint8 | 10 | 5-30 | Noise improvement % required to continue reducing |
+| `ff_autotune_scale_step` | uint8 | 1 | 1-3 | Uniform P+D scale-down step per iteration |
+| `ff_autotune_scale_max` | uint8 | 8 | 2-15 | Maximum cumulative scale-down |
+| `ff_autotune_scale_adj_roll` | int8 | 0 | -15..0 | Learned Roll scale-down (persisted) |
+| `ff_autotune_scale_adj_pitch` | int8 | 0 | -15..0 | Learned Pitch scale-down (persisted) |
+
+> **Note:** `noise_window_ms` was removed. Noise is measured during the RISING phase (`|D-term|` accumulation) rather than a separate post-maneuver window.
+
 ---
 
-## Debug Output Extension
+## Debug Output
 
-Extend the existing `DEBUG_FF_AUTOTUNE` channels or add a new `DEBUG_FF_AUTOTUNE_PD` mode:
+All phases use the consolidated `DEBUG_FF_AUTOTUNE` mode. Channels 0-3 are universal; channels 4-7 are phase-multiplexed based on `debug[3]` (phase).
 
-| Channel | Name | Description | Units/Values |
-|---------|------|-------------|--------------|
-| 0 | `ringing_score` | Combined ringing score from last maneuver | score (×10) |
-| 1 | `zero_crossings` | Zero-crossing count in analysis window | count |
-| 2 | `ring_amplitude` | Peak-to-peak amplitude after first overshoot | deg/s |
-| 3 | `p_adjustment` | Current cumulative P adjustment | signed |
-| 4 | `d_adjustment` | Current cumulative D adjustment | signed |
-| 5 | `ring_window_active` | Analysis window state | 0=closed, 1=open |
-| 6 | `autotune_phase` | Current phase | 0=Phase1, 1=Phase2, 2=Complete |
-| 7 | `ring_assessment` | Ringing assessment | 0=well-damped, 1=mild, 2=ringing |
+See `DEBUG_PHASE2.md` for the full channel layout and interpretation guide.
 
 ---
 
@@ -339,9 +357,9 @@ Extend the existing `DEBUG_FF_AUTOTUNE` channels or add a new `DEBUG_FF_AUTOTUNE
    ├── Maneuver 7-10: Binary search within bracket
    └── Converge at F = 27 (example)
 
-3. Phase 2 activates on this axis (F-term converged)
+4. Phase 2a activates on this axis (F-term converged)
 
-4. Phase 2a: P Reduction
+5. Phase 2a: P Reduction
    ├── Maneuver 11: Measure ringing at P=33 → score=45 (RINGING)
    ├── Decrease P to 31
    ├── Maneuver 12: Measure ringing at P=31 → score=28 (MILD)
@@ -351,13 +369,21 @@ Extend the existing `DEBUG_FF_AUTOTUNE` channels or add a new `DEBUG_FF_AUTOTUNE
    ├── Maneuver 14: Test P=30 → score=18 (MILD, below threshold)
    └── Converge at P=30 (adjustment = -3)
 
-5. If Phase 2a was insufficient (ringing still above threshold at minimum P):
-   Phase 2b: D Increase
+6. Phase 2b: P/D Scale-Down (Noise)
+   ├── Maneuver 15: Measure baseline |D-term| during RISING = 80
+   ├── Apply scaleAdjustment = -1 (reduce both P and D by 1)
+   ├── Maneuver 16: Measure |D-term| = 65 (improved)
+   ├── Apply scaleAdjustment = -2
+   ├── Maneuver 17: Measure |D-term| = 58 (improvement < threshold)
+   └── Converge at scaleAdjustment = -2
+
+7. If Phase 2a was insufficient (ringing still above threshold at minimum P):
+   D-term increase fallback within Phase 2a
    ├── Increase D by d_step
    ├── Re-measure ringing
    └── Converge similarly
 
-6. F-Term Spot Check (after P/D converged)
+8. F-Term Spot Check (after Phase 2b converged)
    ├── Re-run Phase 1 tracking error measurement for 2-3 maneuvers
    ├── Compare avg tracking error against the Phase 1 converged value
    ├── If error shifted beyond deadband:
@@ -397,10 +423,16 @@ The existing save-on-deactivation policy extends naturally:
 
 - When mode switches OFF, save **all** modified parameters:
   - F-term gains (Phase 1) — `ff_autotune_gain_roll`, `ff_autotune_gain_pitch`
-  - P adjustments (Phase 2) — `ff_autotune_p_adj_roll`, `ff_autotune_p_adj_pitch`
-  - D adjustments (Phase 2b) — `ff_autotune_d_adj_roll`, `ff_autotune_d_adj_pitch`
+  - P adjustments (Phase 2a) — `ff_autotune_p_adj_roll`, `ff_autotune_p_adj_pitch`
+  - D adjustments (Phase 2a) — `ff_autotune_d_adj_roll`, `ff_autotune_d_adj_pitch`
+  - Scale adjustments (Phase 2b) — `ff_autotune_scale_adj_roll`, `ff_autotune_scale_adj_pitch`
 - Adjustments are stored as **deltas from the base PID**, not absolute values
 - This means the pilot can still independently tune P and D in the configurator, and the autotune adjustments are applied on top
+- The effective PID modification in `pid.c` is:
+  ```
+  P_effective = base_P + pAdjustment + scaleAdjustment
+  D_effective = base_D + dAdjustment + scaleAdjustment
+  ```
 
 ---
 
@@ -420,14 +452,12 @@ The existing save-on-deactivation policy extends naturally:
 
 | File | Changes |
 |------|---------|
-| `src/main/flight/ff_autotune.h` | Add Phase 2 enums, state structs, new API functions |
-| `src/main/flight/ff_autotune.c` | Add ringing analysis, P/D adjustment logic, Phase 2 state machine |
-| `src/main/pg/ff_autotune.h` | Add Phase 2 config fields |
-| `src/main/pg/ff_autotune.c` | Register new parameters with defaults |
-| `src/main/cli/settings.c` | Add new CLI parameters |
-| `src/main/flight/pid.c` | Add P-term and D-term override hooks for Phase 2 |
-| `src/main/build/debug.h` | Add `DEBUG_FF_AUTOTUNE_PD` mode (if separate from Phase 1 debug) |
-| `src/main/build/debug.c` | Register new debug mode |
+| `src/main/flight/ff_autotune.h` | Add Phase 2 enums (incl. Phase2b_Scale, noise assessment), state structs, new API functions |
+| `src/main/flight/ff_autotune.c` | Add ringing analysis (Schmitt trigger), P/D adjustment, Phase 2b noise scale-down, Phase 3 recheck |
+| `src/main/pg/ff_autotune.h` | Add Phase 2a + 2b config fields |
+| `src/main/pg/ff_autotune.c` | Register new parameters with defaults, PG version 3 |
+| `src/main/cli/settings.c` | Add Phase 2a + 2b CLI parameters |
+| `src/main/flight/pid.c` | Add P-term and D-term override hooks, scale adjustment (additive on both P and D) |
 
 ---
 
@@ -500,3 +530,4 @@ Based on this data:
 | Date | Version | Author | Changes |
 |------|---------|--------|---------|
 | 2026-02-07 | 0.1 | PMantix + Claude | Initial design document |
+| 2026-02-08 | 0.2 | PMantix + Claude | Updated: Schmitt trigger zero-crossing detection (`ringLastSide` replacing `ringPrevError`), Phase 2b separated as P/D scale-down (noise measurement during RISING), consolidated `FF_AUTOTUNE` debug mode, `noise_window_ms` removed, PG version 3, scale adjustment EEPROM fields |
