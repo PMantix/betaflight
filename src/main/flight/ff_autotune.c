@@ -79,7 +79,7 @@
 #define FF_AUTOTUNE_ADJUST_DELAY_US 100000  // 100ms delay before adjusting F term
 #define FF_AUTOTUNE_MIN_IDLE_US     200000  // 200ms minimum IDLE dwell before next RISING
 #define FF_CONVERGENCE_COUNT        3       // Consecutive all-good maneuvers to declare COMPLETE
-#define FF_NOISE_FLOOR_SCORE        350     // Absolute noise score (avg|D|×10) below which noise is acceptable
+// FF_NOISE_FLOOR_SCORE replaced by configurable noise_floor (default 600)
 #define FF_WIGGLE_AMPLITUDE         40.0f   // Wiggle amplitude (deg/s) for COMPLETE notification
 #define FF_WIGGLE_DURATION_US       400000  // 400ms wiggle (1.5 sine cycles, ~3.75Hz)
 #define FF_WIGGLE_DELAY_US          500000  // 500ms delay after IDLE entry before wiggle
@@ -223,12 +223,20 @@ static struct {
     bool pendingSave;               // EEPROM write deferred until disarm
     bool gainsLearned;              // Learned gains should be applied (survives mode-off)
     float filterGroupDelay;         // Estimated gyro filter chain group delay (seconds)
+    uint16_t lpf2BaseCutoff;        // Original LPF2 cutoff at init (Hz)
+    int16_t lpf2Adjustment;         // Current LPF2 cutoff adjustment (Hz, negative = reduced)
     ffAxisState_t axis[2];          // Roll and Pitch only
 } runtime;
 
 // ============================================================================
 // FILTER GROUP DELAY ESTIMATION
 // ============================================================================
+
+static uint16_t getEffectiveLpf2Hz(void)
+{
+    int16_t effective = (int16_t)gyroConfig()->gyro_lpf2_static_hz + runtime.lpf2Adjustment;
+    return (effective > 0) ? (uint16_t)effective : 0;
+}
 
 static float estimateFilterGroupDelay(void)
 {
@@ -245,8 +253,8 @@ static float estimateFilterGroupDelay(void)
         }
     }
 
-    // Gyro lowpass filter 2
-    const uint16_t lpf2Hz = gyroConfig()->gyro_lpf2_static_hz;
+    // Gyro lowpass filter 2 (uses effective cutoff including autotune adjustment)
+    const uint16_t lpf2Hz = getEffectiveLpf2Hz();
     if (lpf2Hz > 0) {
         switch (gyroConfig()->gyro_lpf2_type) {
             case FILTER_PT1:    delay += 0.159f / lpf2Hz; break;
@@ -279,6 +287,42 @@ static float estimateFilterGroupDelay(void)
 }
 
 // ============================================================================
+// RUNTIME LPF2 CUTOFF UPDATE
+// ============================================================================
+
+static void applyLpf2Cutoff(uint16_t newCutoffHz)
+{
+    if (newCutoffHz == 0) {
+        return;
+    }
+
+    const float gyroDt = gyro.sampleLooptime * 1e-6f;
+
+    switch (gyroConfig()->gyro_lpf2_type) {
+        case FILTER_PT1:
+            for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+                pt1FilterUpdateCutoff(&gyro.lowpass2Filter[axis].pt1FilterState, pt1FilterGain(newCutoffHz, gyroDt));
+            }
+            break;
+        case FILTER_BIQUAD:
+            for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+                biquadFilterUpdateLPF(&gyro.lowpass2Filter[axis].biquadFilterState, newCutoffHz, gyro.sampleLooptime);
+            }
+            break;
+        case FILTER_PT2:
+            for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+                pt2FilterUpdateCutoff(&gyro.lowpass2Filter[axis].pt2FilterState, pt2FilterGain(newCutoffHz, gyroDt));
+            }
+            break;
+        case FILTER_PT3:
+            for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+                pt3FilterUpdateCutoff(&gyro.lowpass2Filter[axis].pt3FilterState, pt3FilterGain(newCutoffHz, gyroDt));
+            }
+            break;
+    }
+}
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 
@@ -286,7 +330,19 @@ void ffAutotuneInit(void)
 {
     memset(&runtime, 0, sizeof(runtime));
 
-    // Estimate gyro filter chain group delay for tracking error compensation
+    // Load LPF2 base cutoff and persisted adjustment
+    runtime.lpf2BaseCutoff = gyroConfig()->gyro_lpf2_static_hz;
+    runtime.lpf2Adjustment = ffAutotuneConfig()->lpf2_adj;
+
+    // Apply persisted LPF2 adjustment to runtime filter
+    if (runtime.lpf2Adjustment != 0 && runtime.lpf2BaseCutoff > 0) {
+        const uint16_t effectiveHz = getEffectiveLpf2Hz();
+        if (effectiveHz > 0) {
+            applyLpf2Cutoff(effectiveHz);
+        }
+    }
+
+    // Estimate gyro filter chain group delay (uses effective LPF2 cutoff)
     runtime.filterGroupDelay = estimateFilterGroupDelay();
 
     // Load initial gains from config
@@ -380,6 +436,11 @@ uint8_t ffAutotuneGetGain(int axis)
     return runtime.axis[axis].gain;
 }
 
+int16_t ffAutotuneGetLpf2Adjustment(void)
+{
+    return runtime.lpf2Adjustment;
+}
+
 float ffAutotuneGetWiggleOffset(int axis)
 {
     if (axis > FD_PITCH) {
@@ -412,6 +473,9 @@ void ffAutotuneSaveGains(void)
     // Save Phase 2b scale adjustments to RAM config
     ffAutotuneConfigMutable()->scale_adj_roll = runtime.axis[FD_ROLL].scaleAdjustment;
     ffAutotuneConfigMutable()->scale_adj_pitch = runtime.axis[FD_PITCH].scaleAdjustment;
+
+    // Save LPF2 adjustment
+    ffAutotuneConfigMutable()->lpf2_adj = runtime.lpf2Adjustment;
 
     // Defer EEPROM write to disarm to avoid blocking the PID loop
     runtime.pendingSave = true;
@@ -867,6 +931,59 @@ static void noiseReset(ffAxisState_t *state)
     state->noiseSampleCount = 0;
 }
 
+static bool tryReduceLpf2(void)
+{
+    if (runtime.lpf2BaseCutoff == 0) {
+        return false;  // No LPF2 configured
+    }
+
+    const uint8_t lpf2Step = ffAutotuneConfig()->lpf2_step;
+    const uint16_t lpf2Min = ffAutotuneConfig()->lpf2_min;
+
+    const uint16_t currentHz = getEffectiveLpf2Hz();
+    if (currentHz <= lpf2Min) {
+        return false;  // Already at minimum
+    }
+
+    // Reduce LPF2 cutoff by one step
+    int16_t newAdj = runtime.lpf2Adjustment - (int16_t)lpf2Step;
+    uint16_t newHz = (int16_t)runtime.lpf2BaseCutoff + newAdj;
+    if (newHz < lpf2Min) {
+        newHz = lpf2Min;
+        newAdj = (int16_t)lpf2Min - (int16_t)runtime.lpf2BaseCutoff;
+    }
+
+    runtime.lpf2Adjustment = newAdj;
+    applyLpf2Cutoff(newHz);
+
+    // Recalculate filter group delay with new LPF2
+    runtime.filterGroupDelay = estimateFilterGroupDelay();
+    runtime.gainsModified = true;
+
+    return true;
+}
+
+static void revertLpf2Step(void)
+{
+    if (runtime.lpf2BaseCutoff == 0) {
+        return;
+    }
+
+    const uint8_t lpf2Step = ffAutotuneConfig()->lpf2_step;
+    runtime.lpf2Adjustment += (int16_t)lpf2Step;
+    if (runtime.lpf2Adjustment > 0) {
+        runtime.lpf2Adjustment = 0;
+    }
+
+    const uint16_t newHz = getEffectiveLpf2Hz();
+    if (newHz > 0) {
+        applyLpf2Cutoff(newHz);
+    }
+
+    runtime.filterGroupDelay = estimateFilterGroupDelay();
+    runtime.gainsModified = true;
+}
+
 static void processPhase2bNoise(ffAxisState_t *state)
 {
     // Compute noise score from |D-term| accumulated during the RISING phase
@@ -878,52 +995,62 @@ static void processPhase2bNoise(ffAxisState_t *state)
     noiseReset(state);
     state->lastNoiseScore = noiseScore;
 
-    const uint8_t scaleStep = ffAutotuneConfig()->scale_step;
-    const int16_t scaleMax = -(int16_t)ffAutotuneConfig()->scale_max;  // Negative: reduction
-    const uint8_t noiseThreshold = ffAutotuneConfig()->noise_threshold;
+    const uint16_t noiseFloor = ffAutotuneConfig()->noise_floor;
+
+    // Below noise floor — noise is acceptable, no action needed
+    if (noiseScore <= noiseFloor) {
+        state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
+        return;
+    }
 
     if (state->noiseBaseline == 0) {
-        // First measurement: establish baseline
+        // First measurement above floor: establish baseline
         state->noiseBaseline = noiseScore;
         state->lastNoiseAssessment = FF_NOISE_HIGH;
 
-        if (noiseScore == 0) {
-            // No measurable noise
-            state->lastNoiseAssessment = FF_NOISE_MINIMAL;
-            return;
+        // Try LPF2 reduction first, fall back to P/D scale
+        if (!tryReduceLpf2()) {
+            const uint8_t scaleStep = ffAutotuneConfig()->scale_step;
+            state->scaleAdjustment -= scaleStep;
+            runtime.gainsModified = true;
         }
-
-        // Apply first scale-down step
-        state->scaleAdjustment -= scaleStep;
-        runtime.gainsModified = true;
         return;
     }
 
     // Compare noise to baseline
-    if (state->noiseBaseline > 0) {
-        uint16_t improvement = 0;
-        if (noiseScore < state->noiseBaseline) {
-            improvement = ((state->noiseBaseline - noiseScore) * 100) / state->noiseBaseline;
-        }
+    const uint8_t noiseThreshold = ffAutotuneConfig()->noise_threshold;
+    const uint8_t scaleStep = ffAutotuneConfig()->scale_step;
+    const int16_t scaleMax = -(int16_t)ffAutotuneConfig()->scale_max;
 
-        if (noiseScore > state->noiseBaseline) {
-            // Noise increased — revert last step
-            state->scaleAdjustment += scaleStep;
-            state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
-            runtime.gainsModified = true;
-        } else if (improvement >= noiseThreshold && state->scaleAdjustment > scaleMax) {
-            // Noise improved enough and haven't hit max — continue reducing
-            state->lastNoiseAssessment = FF_NOISE_HIGH;
-            state->scaleAdjustment -= scaleStep;
-            if (state->scaleAdjustment < scaleMax) {
-                state->scaleAdjustment = scaleMax;
+    uint16_t improvement = 0;
+    if (noiseScore < state->noiseBaseline) {
+        improvement = ((state->noiseBaseline - noiseScore) * 100) / state->noiseBaseline;
+    }
+
+    if (noiseScore > state->noiseBaseline) {
+        // Noise increased — revert last adjustment
+        revertLpf2Step();
+        state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
+    } else if (improvement >= noiseThreshold) {
+        // Noise improving — continue reducing (LPF2 first, then P/D scale)
+        state->lastNoiseAssessment = FF_NOISE_HIGH;
+        if (!tryReduceLpf2()) {
+            // LPF2 at minimum, try P/D scale-down
+            if (state->scaleAdjustment > scaleMax) {
+                state->scaleAdjustment -= scaleStep;
+                if (state->scaleAdjustment < scaleMax) {
+                    state->scaleAdjustment = scaleMax;
+                }
+                runtime.gainsModified = true;
+            } else {
+                // Both tools exhausted
+                state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
             }
-            runtime.gainsModified = true;
-        } else {
-            // Improvement below threshold or hit max — converged
-            state->lastNoiseAssessment = (noiseScore < state->noiseBaseline / 2) ?
-                FF_NOISE_MINIMAL : FF_NOISE_ACCEPTABLE;
         }
+    } else {
+        // Improvement below threshold — converged
+        state->lastNoiseAssessment = (noiseScore < state->noiseBaseline / 2) ?
+            FF_NOISE_MINIMAL : FF_NOISE_ACCEPTABLE;
     }
 }
 
@@ -956,8 +1083,8 @@ static ffAutotunePhase_e priorityDecision(ffAxisState_t *state)
         return FF_AUTOTUNE_PHASE2_PD;
     }
 
-    // Priority 3: Noise above absolute floor — scale down P+D (keep ratio)
-    if (m->noiseScore > FF_NOISE_FLOOR_SCORE) {
+    // Priority 3: Noise above absolute floor — reduce LPF2 / scale down P+D
+    if (m->noiseScore > ffAutotuneConfig()->noise_floor) {
         return FF_AUTOTUNE_PHASE2B_SCALE;
     }
 
@@ -987,7 +1114,7 @@ static void checkConvergence(ffAxisState_t *state)
 
     bool trackingOk = ABS(m->trackingError) <= deadband;
     bool ringingOk = m->ringingScore <= ringThreshold;
-    bool noiseOk = m->noiseScore <= FF_NOISE_FLOOR_SCORE;
+    bool noiseOk = m->noiseScore <= ffAutotuneConfig()->noise_floor;
 
     if (trackingOk && ringingOk && noiseOk) {
         state->convergenceCount++;
@@ -1277,7 +1404,7 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
             case FF_AUTOTUNE_PHASE2B_SCALE:
                 DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, state->lastNoiseScore);
                 DEBUG_SET(DEBUG_FF_AUTOTUNE, 5, state->scaleAdjustment);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, state->noiseBaseline);
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, getEffectiveLpf2Hz());
                 DEBUG_SET(DEBUG_FF_AUTOTUNE, 7, state->lastNoiseAssessment);
                 break;
             case FF_AUTOTUNE_COMPLETE:

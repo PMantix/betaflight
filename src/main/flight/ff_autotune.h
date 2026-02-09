@@ -81,6 +81,7 @@ void ffAutotuneReset(void);
 bool ffAutotuneIsPhase2Active(void);
 int16_t ffAutotuneGetPAdjustment(int axis);
 int16_t ffAutotuneGetDAdjustment(int axis);
+int16_t ffAutotuneGetLpf2Adjustment(void);
 
 // COMPLETE notification wiggle offset (added to setpoint in pid.c)
 float ffAutotuneGetWiggleOffset(int axis);

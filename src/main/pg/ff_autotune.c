@@ -22,7 +22,7 @@
 #include "pg/pg_ids.h"
 #include "pg/ff_autotune.h"
 
-PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 4);
+PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 5);
 
 PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     // Phase 1: F-term tuning
@@ -50,10 +50,14 @@ PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     .p_adj_pitch = 0,           // No initial P adjustment
     .d_adj_roll = 0,            // No initial D adjustment
     .d_adj_pitch = 0,           // No initial D adjustment
-    // Phase 2b: P/D scale-down for noise reduction
+    // Phase 2b: Noise reduction (filter adjustment + P/D scale-down)
+    .noise_floor = 600,         // Absolute noise score (avg|D|×10) below which noise is acceptable
     .noise_threshold = 10,      // 10% noise improvement threshold to continue
+    .lpf2_step = 25,            // 25 Hz LPF2 cutoff reduction per iteration
+    .lpf2_min = 150,            // Minimum 150 Hz LPF2 cutoff
     .scale_step = 1,            // 1 unit step per iteration
     .scale_max = 15,            // Max 15 units cumulative scale-down
+    .lpf2_adj = 0,              // No initial LPF2 adjustment
     .scale_adj_roll = 0,        // No initial scale adjustment
     .scale_adj_pitch = 0,       // No initial scale adjustment
 );
