@@ -1504,9 +1504,12 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         float feedforwardGain = launchControlActive ? 0.0f : pidRuntime.pidCoefficient[axis].Kf;
         
 #ifdef USE_FF_AUTOTUNE
-        // Override feedforward gain with learned value (persists after mode-off until disarm)
+        // Additive F adjustment (persists after mode-off until disarm)
         if (ffAutotuneHasLearnedGains() && axis <= FD_PITCH) {
-            feedforwardGain = FEEDFORWARD_SCALE * (ffAutotuneGetGain(axis) * 0.01f);
+            int16_t fAdj = ffAutotuneGetFAdjustment(axis);
+            if (fAdj != 0) {
+                feedforwardGain += FEEDFORWARD_SCALE * (fAdj * 0.01f);
+            }
         }
 #endif
         

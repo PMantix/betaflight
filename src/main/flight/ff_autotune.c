@@ -84,6 +84,12 @@
 #define FF_WIGGLE_DURATION_US       400000  // 400ms wiggle (1.5 sine cycles, ~3.75Hz)
 #define FF_WIGGLE_DELAY_US          500000  // 500ms delay after IDLE entry before wiggle
 
+// Noise tool identifiers (for revert tracking)
+#define NOISE_TOOL_NONE       0
+#define NOISE_TOOL_DTERM_LPF2 1
+#define NOISE_TOOL_GYRO_LPF2  2
+#define NOISE_TOOL_SCALE      3
+
 // ============================================================================
 // HISTORY ENTRY (Phase 1)
 // ============================================================================
@@ -116,7 +122,7 @@ typedef struct {
     int16_t  trackingError;         // avgError x10
     int8_t   trackingAssessment;    // -1=lag, 0=optimal, +1=lead
     uint16_t ringingScore;
-    ffRingAssessment_e ringAssessment;
+    ffDampingAssessment_e dampingAssessment;
     uint16_t noiseScore;            // avg|D| x10
     bool     valid;
 } ffMetricSnapshot_t;
@@ -159,7 +165,7 @@ typedef struct {
     int16_t upperError;             // Error at upper bound
     ffBracketState_e bracketState;  // Current bracket state
 
-    // Phase 2: Ringing measurement
+    // Phase 2: Ringing/damping measurement
     float ringPeakPos;              // Max positive error in window (after 1st overshoot)
     float ringPeakNeg;              // Max negative error in window
     uint16_t ringZeroCrossings;     // Zero-crossing count in window
@@ -169,13 +175,14 @@ typedef struct {
     bool ringWindowActive;          // Currently in analysis window
     timeUs_t ringWindowStartTime;   // When analysis window opened
     float ringFirstPeakValue;       // Tracks the first peak for skipping
+    float ringSignedErrorAccum;     // Sum of signed errors during ringing window
+    uint32_t ringSignedErrorCount;  // Sample count for mean signed error
 
     // Phase 2: P/D adjustment state
     int16_t pAdjustment;            // Cumulative P adjustment (negative = decreased)
     int16_t dAdjustment;            // Cumulative D adjustment (positive = increased)
-    bool adjustingD;                // Currently adjusting D (Phase 2a fallback)
     uint16_t lastRingingScore;      // Last measured ringing score (x10)
-    ffRingAssessment_e lastRingAssessment; // Last ringing assessment
+    ffDampingAssessment_e lastDampingAssessment; // Last damping assessment
 
     // Phase 2: Ringing history for bracketing
     ffRingHistoryEntry_t ringHistory[FF_AUTOTUNE_HISTORY_SIZE];
@@ -192,9 +199,20 @@ typedef struct {
     uint16_t lastNoiseScore;            // Last measured noise (×10)
     uint16_t noiseBaseline;             // Baseline noise before scaling started (×10)
 
-    // Phase 2b: Scale adjustment
-    int16_t scaleAdjustment;            // Cumulative scale-down (negative = reduced)
-    ffNoiseAssessment_e lastNoiseAssessment;
+    // Phase 2b: Gyro noise measurement (during RISING phase)
+    float gyroNoiseAccumulator;         // Sum of |gyroADC - gyroADCf| during rise
+    uint32_t gyroNoiseSampleCount;      // Samples accumulated during rise
+    uint16_t lastGyroNoiseScore;        // Last measured gyro noise (×10)
+    ffNoiseSrc_e lastNoiseSrc;          // Last diagnosed noise source
+
+    // Phase 2b: Gain noise — ratio-preserving scale
+    uint8_t gainScalePercent;           // 100 = no scaling, decreased for noise
+    uint8_t lastNoiseTool;              // Which tool was last applied (for revert)
+
+    // D noise ceiling learning
+    uint8_t dNoiseTriggerCount;         // Times noise triggered near current D level
+    int16_t lastNoiseDLevel;            // Effective D when noise last triggered
+    uint16_t maneuversSinceNoise;       // Consecutive maneuvers without noise (for reassessment)
 
     // Concurrent metric snapshot (all three metrics from last maneuver)
     ffMetricSnapshot_t lastMetrics;
@@ -223,8 +241,11 @@ static struct {
     bool pendingSave;               // EEPROM write deferred until disarm
     bool gainsLearned;              // Learned gains should be applied (survives mode-off)
     float filterGroupDelay;         // Estimated gyro filter chain group delay (seconds)
-    uint16_t lpf2BaseCutoff;        // Original LPF2 cutoff at init (Hz)
-    int16_t lpf2Adjustment;         // Current LPF2 cutoff adjustment (Hz, negative = reduced)
+    uint16_t lpf2BaseCutoff;        // Original gyro LPF2 cutoff at init (Hz)
+    int16_t lpf2Adjustment;         // Current gyro LPF2 cutoff adjustment (Hz, negative = reduced)
+    uint16_t dtermLpf2BaseCutoff;   // Original D-term LPF2 cutoff at init (Hz)
+    int16_t dtermLpf2Adjustment;    // Current D-term LPF2 cutoff adjustment (Hz, negative = reduced)
+    uint8_t dtermLpf2Type;          // Cached D-term LPF2 filter type
     ffAxisState_t axis[2];          // Roll and Pitch only
 } runtime;
 
@@ -323,6 +344,46 @@ static void applyLpf2Cutoff(uint16_t newCutoffHz)
 }
 
 // ============================================================================
+// RUNTIME D-TERM LPF2 CUTOFF UPDATE
+// ============================================================================
+
+static uint16_t getEffectiveDtermLpf2Hz(void)
+{
+    int16_t effective = (int16_t)runtime.dtermLpf2BaseCutoff + runtime.dtermLpf2Adjustment;
+    return (effective > 0) ? (uint16_t)effective : 0;
+}
+
+static void applyDtermLpf2Cutoff(uint16_t newCutoffHz)
+{
+    if (newCutoffHz == 0) {
+        return;
+    }
+
+    switch (runtime.dtermLpf2Type) {
+        case FILTER_PT1:
+            for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+                pt1FilterUpdateCutoff(&pidRuntime.dtermLowpass2[axis].pt1Filter, pt1FilterGain(newCutoffHz, pidRuntime.dT));
+            }
+            break;
+        case FILTER_BIQUAD:
+            for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+                biquadFilterUpdateLPF(&pidRuntime.dtermLowpass2[axis].biquadFilter, newCutoffHz, targetPidLooptime);
+            }
+            break;
+        case FILTER_PT2:
+            for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+                pt2FilterUpdateCutoff(&pidRuntime.dtermLowpass2[axis].pt2Filter, pt2FilterGain(newCutoffHz, pidRuntime.dT));
+            }
+            break;
+        case FILTER_PT3:
+            for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+                pt3FilterUpdateCutoff(&pidRuntime.dtermLowpass2[axis].pt3Filter, pt3FilterGain(newCutoffHz, pidRuntime.dT));
+            }
+            break;
+    }
+}
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 
@@ -330,11 +391,11 @@ void ffAutotuneInit(void)
 {
     memset(&runtime, 0, sizeof(runtime));
 
-    // Load LPF2 base cutoff and persisted adjustment
+    // Load gyro LPF2 base cutoff and persisted adjustment
     runtime.lpf2BaseCutoff = gyroConfig()->gyro_lpf2_static_hz;
     runtime.lpf2Adjustment = ffAutotuneConfig()->lpf2_adj;
 
-    // Apply persisted LPF2 adjustment to runtime filter
+    // Apply persisted gyro LPF2 adjustment to runtime filter
     if (runtime.lpf2Adjustment != 0 && runtime.lpf2BaseCutoff > 0) {
         const uint16_t effectiveHz = getEffectiveLpf2Hz();
         if (effectiveHz > 0) {
@@ -342,12 +403,30 @@ void ffAutotuneInit(void)
         }
     }
 
+    // Load D-term LPF2 base cutoff, type, and persisted adjustment
+    runtime.dtermLpf2BaseCutoff = currentPidProfile->dterm_lpf2_static_hz;
+    runtime.dtermLpf2Type = currentPidProfile->dterm_lpf2_type;
+    runtime.dtermLpf2Adjustment = ffAutotuneConfig()->dterm_lpf2_adj;
+
+    // Apply persisted D-term LPF2 adjustment to runtime filter
+    if (runtime.dtermLpf2Adjustment != 0 && runtime.dtermLpf2BaseCutoff > 0) {
+        const uint16_t effectiveHz = getEffectiveDtermLpf2Hz();
+        if (effectiveHz > 0) {
+            applyDtermLpf2Cutoff(effectiveHz);
+        }
+    }
+
     // Estimate gyro filter chain group delay (uses effective LPF2 cutoff)
     runtime.filterGroupDelay = estimateFilterGroupDelay();
 
-    // Load initial gains from config
-    runtime.axis[FD_ROLL].gain = ffAutotuneConfig()->gain_roll;
-    runtime.axis[FD_PITCH].gain = ffAutotuneConfig()->gain_pitch;
+    // Load F gains: start from configured F, apply learned adjustment
+    for (int i = 0; i < 2; i++) {
+        const int16_t fAdj = (i == 0) ? ffAutotuneConfig()->f_adj_roll : ffAutotuneConfig()->f_adj_pitch;
+        int16_t gain = (int16_t)currentPidProfile->pid[i].F + fAdj;
+        if (gain < ffAutotuneConfig()->gain_min) gain = ffAutotuneConfig()->gain_min;
+        if (gain > ffAutotuneConfig()->gain_max) gain = ffAutotuneConfig()->gain_max;
+        runtime.axis[i].gain = (uint8_t)gain;
+    }
 
     // Load Phase 2 adjustments from config
     runtime.axis[FD_ROLL].pAdjustment = ffAutotuneConfig()->p_adj_roll;
@@ -355,9 +434,9 @@ void ffAutotuneInit(void)
     runtime.axis[FD_ROLL].dAdjustment = ffAutotuneConfig()->d_adj_roll;
     runtime.axis[FD_PITCH].dAdjustment = ffAutotuneConfig()->d_adj_pitch;
 
-    // Load Phase 2b scale adjustments from config
-    runtime.axis[FD_ROLL].scaleAdjustment = ffAutotuneConfig()->scale_adj_roll;
-    runtime.axis[FD_PITCH].scaleAdjustment = ffAutotuneConfig()->scale_adj_pitch;
+    // Load gain scale percent from config
+    runtime.axis[FD_ROLL].gainScalePercent = ffAutotuneConfig()->gain_scale_roll;
+    runtime.axis[FD_PITCH].gainScalePercent = ffAutotuneConfig()->gain_scale_pitch;
 
     // Initialize bracket bounds to extremes
     for (int i = 0; i < 2; i++) {
@@ -396,7 +475,7 @@ bool ffAutotuneIsPhase2Active(void)
         return false;
     }
     for (int i = 0; i < 2; i++) {
-        if (runtime.axis[i].phase >= FF_AUTOTUNE_PHASE2_PD) {
+        if (runtime.axis[i].phase >= FF_AUTOTUNE_PHASE2_UNDERDAMPED) {
             return true;
         }
     }
@@ -404,7 +483,7 @@ bool ffAutotuneIsPhase2Active(void)
     if (ffAutotuneConfig()->pd_enabled) {
         for (int i = 0; i < 2; i++) {
             if (runtime.axis[i].pAdjustment != 0 || runtime.axis[i].dAdjustment != 0 ||
-                runtime.axis[i].scaleAdjustment != 0) {
+                runtime.axis[i].gainScalePercent < 100) {
                 return true;
             }
         }
@@ -417,7 +496,12 @@ int16_t ffAutotuneGetPAdjustment(int axis)
     if (axis > FD_PITCH) {
         return 0;
     }
-    return runtime.axis[axis].pAdjustment + runtime.axis[axis].scaleAdjustment;
+    const int16_t baseP = (int16_t)currentPidProfile->pid[axis].P;
+    const int16_t pAdj = runtime.axis[axis].pAdjustment;
+    int16_t effectiveP = (int16_t)(((int32_t)(baseP + pAdj) * runtime.axis[axis].gainScalePercent) / 100);
+    int16_t adj = effectiveP - baseP;
+    const int16_t minAdj = 1 - baseP;
+    return (adj < minAdj) ? minAdj : adj;
 }
 
 int16_t ffAutotuneGetDAdjustment(int axis)
@@ -425,20 +509,30 @@ int16_t ffAutotuneGetDAdjustment(int axis)
     if (axis > FD_PITCH) {
         return 0;
     }
-    return runtime.axis[axis].dAdjustment + runtime.axis[axis].scaleAdjustment;
+    const int16_t baseD = (int16_t)currentPidProfile->pid[axis].D;
+    const int16_t dAdj = runtime.axis[axis].dAdjustment;
+    int16_t effectiveD = (int16_t)(((int32_t)(baseD + dAdj) * runtime.axis[axis].gainScalePercent) / 100);
+    int16_t adj = effectiveD - baseD;
+    const int16_t minAdj = 1 - baseD;
+    return (adj < minAdj) ? minAdj : adj;
 }
 
-uint8_t ffAutotuneGetGain(int axis)
+int16_t ffAutotuneGetFAdjustment(int axis)
 {
     if (axis > FD_PITCH) {
         return 0;
     }
-    return runtime.axis[axis].gain;
+    return (int16_t)runtime.axis[axis].gain - (int16_t)currentPidProfile->pid[axis].F;
 }
 
 int16_t ffAutotuneGetLpf2Adjustment(void)
 {
     return runtime.lpf2Adjustment;
+}
+
+int16_t ffAutotuneGetDtermLpf2Adjustment(void)
+{
+    return runtime.dtermLpf2Adjustment;
 }
 
 float ffAutotuneGetWiggleOffset(int axis)
@@ -460,9 +554,9 @@ void ffAutotuneSaveGains(void)
         return;
     }
 
-    // Save Phase 1 gains to RAM config
-    ffAutotuneConfigMutable()->gain_roll = runtime.axis[FD_ROLL].gain;
-    ffAutotuneConfigMutable()->gain_pitch = runtime.axis[FD_PITCH].gain;
+    // Save F adjustments (delta from configured F) to RAM config
+    ffAutotuneConfigMutable()->f_adj_roll = (int8_t)((int16_t)runtime.axis[FD_ROLL].gain - (int16_t)currentPidProfile->pid[FD_ROLL].F);
+    ffAutotuneConfigMutable()->f_adj_pitch = (int8_t)((int16_t)runtime.axis[FD_PITCH].gain - (int16_t)currentPidProfile->pid[FD_PITCH].F);
 
     // Save Phase 2 adjustments to RAM config
     ffAutotuneConfigMutable()->p_adj_roll = runtime.axis[FD_ROLL].pAdjustment;
@@ -470,12 +564,21 @@ void ffAutotuneSaveGains(void)
     ffAutotuneConfigMutable()->d_adj_roll = runtime.axis[FD_ROLL].dAdjustment;
     ffAutotuneConfigMutable()->d_adj_pitch = runtime.axis[FD_PITCH].dAdjustment;
 
-    // Save Phase 2b scale adjustments to RAM config
-    ffAutotuneConfigMutable()->scale_adj_roll = runtime.axis[FD_ROLL].scaleAdjustment;
-    ffAutotuneConfigMutable()->scale_adj_pitch = runtime.axis[FD_PITCH].scaleAdjustment;
+    // Save gain scale percent to RAM config
+    ffAutotuneConfigMutable()->gain_scale_roll = runtime.axis[FD_ROLL].gainScalePercent;
+    ffAutotuneConfigMutable()->gain_scale_pitch = runtime.axis[FD_PITCH].gainScalePercent;
 
-    // Save LPF2 adjustment
+    // Save D noise ceilings
+    ffAutotuneConfigMutable()->d_noise_ceiling_roll = runtime.axis[FD_ROLL].lastNoiseDLevel > 0 ?
+        (int8_t)runtime.axis[FD_ROLL].lastNoiseDLevel : ffAutotuneConfig()->d_noise_ceiling_roll;
+    ffAutotuneConfigMutable()->d_noise_ceiling_pitch = runtime.axis[FD_PITCH].lastNoiseDLevel > 0 ?
+        (int8_t)runtime.axis[FD_PITCH].lastNoiseDLevel : ffAutotuneConfig()->d_noise_ceiling_pitch;
+
+    // Save gyro LPF2 adjustment
     ffAutotuneConfigMutable()->lpf2_adj = runtime.lpf2Adjustment;
+
+    // Save D-term LPF2 adjustment
+    ffAutotuneConfigMutable()->dterm_lpf2_adj = runtime.dtermLpf2Adjustment;
 
     // Defer EEPROM write to disarm to avoid blocking the PID loop
     runtime.pendingSave = true;
@@ -715,6 +818,8 @@ static void ringWindowReset(ffAxisState_t *state)
     state->ringWindowActive = false;
     state->ringWindowStartTime = 0;
     state->ringFirstPeakValue = 0.0f;
+    state->ringSignedErrorAccum = 0.0f;
+    state->ringSignedErrorCount = 0;
 }
 
 static void ringWindowOpen(ffAxisState_t *state, float initialError, timeUs_t currentTimeUs)
@@ -733,6 +838,8 @@ static void ringWindowOpen(ffAxisState_t *state, float initialError, timeUs_t cu
         state->ringLastSide = 0;
     }
     state->ringFirstPeakValue = fabsf(initialError);
+    state->ringSignedErrorAccum = initialError;
+    state->ringSignedErrorCount = 1;
 }
 
 static void ringWindowAccumulate(ffAxisState_t *state, float trackingError)
@@ -744,6 +851,8 @@ static void ringWindowAccumulate(ffAxisState_t *state, float trackingError)
     const float deadband = (float)ffAutotuneConfig()->ring_deadband;
 
     state->ringSampleCount++;
+    state->ringSignedErrorAccum += trackingError;
+    state->ringSignedErrorCount++;
 
     // Schmitt trigger zero-crossing detection with deadband hysteresis
     // Latch the last side the signal was on; only trigger a crossing when
@@ -812,28 +921,41 @@ static uint16_t ringWindowClose(ffAxisState_t *state)
     return ringingScore;
 }
 
-static ffRingAssessment_e assessRinging(uint16_t ringingScore)
+static ffDampingAssessment_e assessDamping(ffAxisState_t *state, uint16_t ringingScore)
 {
-    const uint8_t threshold = ffAutotuneConfig()->ring_threshold;
-    const uint8_t thresholdLow = threshold / 2;
+    const uint8_t ringThreshold = ffAutotuneConfig()->ring_threshold;
 
-    if (ringingScore > threshold) {
-        return FF_RING_RINGING;
-    } else if (ringingScore > thresholdLow) {
-        return FF_RING_MILD;
+    if (ringingScore > ringThreshold) {
+        return FF_DAMPING_UNDERDAMPED;
     }
-    return FF_RING_WELL_DAMPED;
+
+    // Overdamped: low oscillation + persistent lag during settling
+    if (state->ringSignedErrorCount >= 10) {
+        float meanSignedError = state->ringSignedErrorAccum / (float)state->ringSignedErrorCount;
+        const float overdampedThreshold = -(float)ffAutotuneConfig()->error_deadband;
+        if (meanSignedError < overdampedThreshold && state->ringZeroCrossings <= 1) {
+            return FF_DAMPING_OVERDAMPED;
+        }
+    }
+
+    return FF_DAMPING_GOOD;
+}
+
+static int8_t getDNoiseCeiling(int axis)
+{
+    return (axis == FD_ROLL) ? ffAutotuneConfig()->d_noise_ceiling_roll
+                             : ffAutotuneConfig()->d_noise_ceiling_pitch;
 }
 
 // ============================================================================
 // PHASE 2: P/D ADJUSTMENT
 // ============================================================================
 
-static void processPhase2Ringing(ffAxisState_t *state)
+static void processDamping(ffAxisState_t *state, int axis)
 {
     uint16_t ringingScore = ringWindowClose(state);
     state->lastRingingScore = ringingScore;
-    state->lastRingAssessment = assessRinging(ringingScore);
+    state->lastDampingAssessment = assessDamping(state, ringingScore);
 
     // Store in ring history
     if (state->ringHistoryCount < FF_AUTOTUNE_HISTORY_SIZE) {
@@ -852,69 +974,69 @@ static void processPhase2Ringing(ffAxisState_t *state)
     }
 
     const int16_t pStep = ffAutotuneConfig()->p_step;
-    const int16_t pAdjMax = -(int16_t)ffAutotuneConfig()->p_adjust_max;  // Negative: P reduction
+    const int16_t dStep = ffAutotuneConfig()->d_step;
+    const int16_t pAdjMax = -(int16_t)ffAutotuneConfig()->p_adjust_max;  // Negative: P reduction limit
 
-    // Phase 2a: P reduction only (D is controlled solely by Phase 2b scale-down)
-    if (state->lastRingAssessment == FF_RING_RINGING) {
-        // Ringing detected: this P value has ringing (too high)
-        // Record as lower bound of P bracket (less negative = higher P = ringing)
+    if (state->lastDampingAssessment == FF_DAMPING_UNDERDAMPED) {
+        // Underdamped: decrease P AND increase D (lower P/D ratio → more damping)
         if (state->ringLowerP == 1 || state->pAdjustment > state->ringLowerP) {
             state->ringLowerP = state->pAdjustment;
         }
 
-        // Decrease P (make adjustment more negative)
+        // Decrease P
         int16_t newP = state->pAdjustment - pStep;
         if (newP < pAdjMax) {
-            // Hit P reduction limit — converge here, let scale-down handle the rest
             state->pAdjustment = pAdjMax;
             state->ringBracketState = FF_BRACKET_CONVERGED;
         } else {
             state->pAdjustment = newP;
         }
+
+        // Increase D (but respect D noise ceiling)
+        int16_t effectiveD = (int16_t)currentPidProfile->pid[axis].D + state->dAdjustment;
+        int8_t ceiling = getDNoiseCeiling(axis);
+        if (ceiling == 0 || effectiveD + dStep <= ceiling) {
+            state->dAdjustment += dStep;
+            if (state->dAdjustment > (int16_t)ffAutotuneConfig()->d_adjust_max) {
+                state->dAdjustment = (int16_t)ffAutotuneConfig()->d_adjust_max;
+            }
+        }
+
         runtime.gainsModified = true;
 
-    } else if (state->lastRingAssessment == FF_RING_WELL_DAMPED) {
-        // Well damped: this P value is good (low enough)
-        // Record as upper bound (more negative = lower P = well-damped)
+    } else if (state->lastDampingAssessment == FF_DAMPING_OVERDAMPED) {
+        // Overdamped: increase P, decrease D (raise P/D ratio)
+        state->pAdjustment += pStep;
+        if (state->pAdjustment > (int16_t)ffAutotuneConfig()->p_adjust_max) {
+            state->pAdjustment = (int16_t)ffAutotuneConfig()->p_adjust_max;
+        }
+
+        state->dAdjustment -= dStep;
+        if (state->dAdjustment < -(int16_t)ffAutotuneConfig()->d_adjust_max) {
+            state->dAdjustment = -(int16_t)ffAutotuneConfig()->d_adjust_max;
+        }
+
+        runtime.gainsModified = true;
+
+    } else {
+        // FF_DAMPING_GOOD
         if (state->ringUpperP == -100 || state->pAdjustment < state->ringUpperP) {
             state->ringUpperP = state->pAdjustment;
         }
 
-        // Check if we have a bracket
         if (state->ringLowerP != 1 && state->ringUpperP != -100 &&
             state->ringLowerP > state->ringUpperP) {
-            // Bracket established
             if (state->ringBracketState == FF_BRACKET_SEARCHING) {
                 state->ringBracketState = FF_BRACKET_BRACKETED;
             }
 
-            // Check convergence
             int16_t bracketWidth = state->ringLowerP - state->ringUpperP;
             if (bracketWidth <= pStep) {
-                // Converged: use the well-damped value
                 state->pAdjustment = state->ringUpperP;
                 state->ringBracketState = FF_BRACKET_CONVERGED;
                 runtime.gainsModified = true;
             } else {
-                // Binary search: try midpoint
                 state->pAdjustment = (state->ringLowerP + state->ringUpperP) / 2;
-                runtime.gainsModified = true;
-            }
-        }
-        // If no bracket yet, P is already good - may converge
-
-    } else {
-        // MILD ringing - could go either way
-        // If we have a bracket, do binary search
-        if (state->ringBracketState == FF_BRACKET_BRACKETED) {
-            state->pAdjustment = (state->ringLowerP + state->ringUpperP) / 2;
-            runtime.gainsModified = true;
-        }
-        // If no bracket, continue decreasing P cautiously
-        else if (state->ringLowerP != 1) {
-            int16_t newP = state->pAdjustment - pStep;
-            if (newP >= pAdjMax) {
-                state->pAdjustment = newP;
                 runtime.gainsModified = true;
             }
         }
@@ -922,19 +1044,72 @@ static void processPhase2Ringing(ffAxisState_t *state)
 }
 
 // ============================================================================
-// PHASE 2B: NOISE MEASUREMENT AND P/D SCALE-DOWN
+// PHASE 2B: NOISE MEASUREMENT AND P/D SCALE-DOWN WITH DIAGNOSTIC
 // ============================================================================
 
 static void noiseReset(ffAxisState_t *state)
 {
     state->noiseAccumulator = 0.0f;
     state->noiseSampleCount = 0;
+    state->gyroNoiseAccumulator = 0.0f;
+    state->gyroNoiseSampleCount = 0;
 }
 
-static bool tryReduceLpf2(void)
+// ── D-term LPF2 tool ──
+
+static bool tryReduceDtermLpf2(void)
+{
+    if (runtime.dtermLpf2BaseCutoff == 0) {
+        return false;  // No D-term LPF2 configured
+    }
+
+    const uint8_t step = ffAutotuneConfig()->dterm_lpf2_step;
+    const uint16_t minHz = ffAutotuneConfig()->dterm_lpf2_min;
+
+    const uint16_t currentHz = getEffectiveDtermLpf2Hz();
+    if (currentHz <= minHz) {
+        return false;  // Already at minimum
+    }
+
+    int16_t newAdj = runtime.dtermLpf2Adjustment - (int16_t)step;
+    uint16_t newHz = (int16_t)runtime.dtermLpf2BaseCutoff + newAdj;
+    if (newHz < minHz) {
+        newHz = minHz;
+        newAdj = (int16_t)minHz - (int16_t)runtime.dtermLpf2BaseCutoff;
+    }
+
+    runtime.dtermLpf2Adjustment = newAdj;
+    applyDtermLpf2Cutoff(newHz);
+    runtime.gainsModified = true;
+
+    return true;
+}
+
+static void revertDtermLpf2Step(void)
+{
+    if (runtime.dtermLpf2BaseCutoff == 0) {
+        return;
+    }
+
+    const uint8_t step = ffAutotuneConfig()->dterm_lpf2_step;
+    runtime.dtermLpf2Adjustment += (int16_t)step;
+    if (runtime.dtermLpf2Adjustment > 0) {
+        runtime.dtermLpf2Adjustment = 0;
+    }
+
+    const uint16_t newHz = getEffectiveDtermLpf2Hz();
+    if (newHz > 0) {
+        applyDtermLpf2Cutoff(newHz);
+    }
+    runtime.gainsModified = true;
+}
+
+// ── Gyro LPF2 tool ──
+
+static bool tryReduceGyroLpf2(void)
 {
     if (runtime.lpf2BaseCutoff == 0) {
-        return false;  // No LPF2 configured
+        return false;  // No gyro LPF2 configured
     }
 
     const uint8_t lpf2Step = ffAutotuneConfig()->lpf2_step;
@@ -945,7 +1120,6 @@ static bool tryReduceLpf2(void)
         return false;  // Already at minimum
     }
 
-    // Reduce LPF2 cutoff by one step
     int16_t newAdj = runtime.lpf2Adjustment - (int16_t)lpf2Step;
     uint16_t newHz = (int16_t)runtime.lpf2BaseCutoff + newAdj;
     if (newHz < lpf2Min) {
@@ -963,7 +1137,7 @@ static bool tryReduceLpf2(void)
     return true;
 }
 
-static void revertLpf2Step(void)
+static void revertGyroLpf2Step(void)
 {
     if (runtime.lpf2BaseCutoff == 0) {
         return;
@@ -984,43 +1158,147 @@ static void revertLpf2Step(void)
     runtime.gainsModified = true;
 }
 
-static void processPhase2bNoise(ffAxisState_t *state)
+// ── Noise source diagnosis ──
+
+static ffNoiseSrc_e diagnoseNoiseSource(uint16_t dtermNoiseScore, uint16_t gyroNoiseScore)
 {
-    // Compute noise score from |D-term| accumulated during the RISING phase
+    const uint16_t noiseFloor = ffAutotuneConfig()->noise_floor;
+    const uint16_t gyroThreshold = ffAutotuneConfig()->gyro_noise_threshold;
+
+    if (dtermNoiseScore <= noiseFloor) {
+        return FF_NOISE_SRC_NONE;
+    }
+
+    if (gyroNoiseScore > gyroThreshold) {
+        return FF_NOISE_SRC_FILTER;
+    }
+
+    return FF_NOISE_SRC_GAIN;
+}
+
+// ── D noise ceiling learning ──
+
+static void recordDNoiseTrigger(ffAxisState_t *state, int axis)
+{
+    int16_t effectiveD = (int16_t)currentPidProfile->pid[axis].D + state->dAdjustment;
+
+    if (ABS(effectiveD - state->lastNoiseDLevel) <= 3) {
+        state->dNoiseTriggerCount++;
+    } else {
+        state->dNoiseTriggerCount = 1;
+    }
+    state->lastNoiseDLevel = effectiveD;
+    state->maneuversSinceNoise = 0;
+
+    // After 3 triggers at similar D level: establish ceiling
+    if (state->dNoiseTriggerCount >= 3) {
+        int8_t ceiling = (int8_t)(effectiveD - 2);
+        if (axis == FD_ROLL) {
+            ffAutotuneConfigMutable()->d_noise_ceiling_roll = ceiling;
+        } else {
+            ffAutotuneConfigMutable()->d_noise_ceiling_pitch = ceiling;
+        }
+        runtime.gainsModified = true;
+    }
+}
+
+// ── Tool application based on diagnosis ──
+
+static void applyNoiseReduction(ffAxisState_t *state, int axis, ffNoiseSrc_e src)
+{
+    const uint8_t gainScaleStep = ffAutotuneConfig()->gain_scale_step;
+    const uint8_t gainScaleMin = ffAutotuneConfig()->gain_scale_min;
+
+    if (src == FF_NOISE_SRC_FILTER) {
+        // Filter noise: D-term LPF2 first, then gyro LPF2, then gain scale
+        if (tryReduceDtermLpf2()) {
+            state->lastNoiseTool = NOISE_TOOL_DTERM_LPF2;
+            return;
+        }
+        if (tryReduceGyroLpf2()) {
+            state->lastNoiseTool = NOISE_TOOL_GYRO_LPF2;
+            return;
+        }
+    }
+
+    // Gain noise (or filter tools exhausted): ratio-preserving gain scale-down
+    if (state->gainScalePercent > gainScaleMin) {
+        state->gainScalePercent -= gainScaleStep;
+        if (state->gainScalePercent < gainScaleMin) {
+            state->gainScalePercent = gainScaleMin;
+        }
+        recordDNoiseTrigger(state, axis);
+        state->lastNoiseTool = NOISE_TOOL_SCALE;
+        runtime.gainsModified = true;
+    } else {
+        state->lastNoiseTool = NOISE_TOOL_NONE;
+    }
+}
+
+static void revertLastNoiseTool(ffAxisState_t *state)
+{
+    switch (state->lastNoiseTool) {
+        case NOISE_TOOL_DTERM_LPF2:
+            revertDtermLpf2Step();
+            break;
+        case NOISE_TOOL_GYRO_LPF2:
+            revertGyroLpf2Step();
+            break;
+        case NOISE_TOOL_SCALE: {
+            const uint8_t gainScaleStep = ffAutotuneConfig()->gain_scale_step;
+            state->gainScalePercent += gainScaleStep;
+            if (state->gainScalePercent > 100) {
+                state->gainScalePercent = 100;
+            }
+            runtime.gainsModified = true;
+            break;
+        }
+        default:
+            break;
+    }
+    state->lastNoiseTool = NOISE_TOOL_NONE;
+}
+
+// ── Main Phase 2b processing ──
+
+static void processPhase2bNoise(ffAxisState_t *state, int axis)
+{
+    // Compute D-term noise score
     uint16_t noiseScore = 0;
     if (state->noiseSampleCount >= 3) {
         float avgNoise = state->noiseAccumulator / (float)state->noiseSampleCount;
         noiseScore = (uint16_t)MIN(avgNoise * 10.0f, 65535);
     }
+
+    // Compute gyro noise score
+    uint16_t gyroNoiseScore = 0;
+    if (state->gyroNoiseSampleCount >= 3) {
+        float avgGyroNoise = state->gyroNoiseAccumulator / (float)state->gyroNoiseSampleCount;
+        gyroNoiseScore = (uint16_t)MIN(avgGyroNoise * 10.0f, 65535);
+    }
+
     noiseReset(state);
     state->lastNoiseScore = noiseScore;
+    state->lastGyroNoiseScore = gyroNoiseScore;
 
-    const uint16_t noiseFloor = ffAutotuneConfig()->noise_floor;
+    // Diagnose noise source
+    ffNoiseSrc_e src = diagnoseNoiseSource(noiseScore, gyroNoiseScore);
+    state->lastNoiseSrc = src;
 
-    // Below noise floor — noise is acceptable, no action needed
-    if (noiseScore <= noiseFloor) {
-        state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
+    // Below noise floor — noise is acceptable
+    if (src == FF_NOISE_SRC_NONE) {
         return;
     }
 
     if (state->noiseBaseline == 0) {
-        // First measurement above floor: establish baseline
+        // First measurement above floor: establish baseline, apply first tool
         state->noiseBaseline = noiseScore;
-        state->lastNoiseAssessment = FF_NOISE_HIGH;
-
-        // Try LPF2 reduction first, fall back to P/D scale
-        if (!tryReduceLpf2()) {
-            const uint8_t scaleStep = ffAutotuneConfig()->scale_step;
-            state->scaleAdjustment -= scaleStep;
-            runtime.gainsModified = true;
-        }
+        applyNoiseReduction(state, axis, src);
         return;
     }
 
     // Compare noise to baseline
     const uint8_t noiseThreshold = ffAutotuneConfig()->noise_threshold;
-    const uint8_t scaleStep = ffAutotuneConfig()->scale_step;
-    const int16_t scaleMax = -(int16_t)ffAutotuneConfig()->scale_max;
 
     uint16_t improvement = 0;
     if (noiseScore < state->noiseBaseline) {
@@ -1029,29 +1307,13 @@ static void processPhase2bNoise(ffAxisState_t *state)
 
     if (noiseScore > state->noiseBaseline) {
         // Noise increased — revert last adjustment
-        revertLpf2Step();
-        state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
+        revertLastNoiseTool(state);
     } else if (improvement >= noiseThreshold) {
-        // Noise improving — continue reducing (LPF2 first, then P/D scale)
-        state->lastNoiseAssessment = FF_NOISE_HIGH;
-        if (!tryReduceLpf2()) {
-            // LPF2 at minimum, try P/D scale-down
-            if (state->scaleAdjustment > scaleMax) {
-                state->scaleAdjustment -= scaleStep;
-                if (state->scaleAdjustment < scaleMax) {
-                    state->scaleAdjustment = scaleMax;
-                }
-                runtime.gainsModified = true;
-            } else {
-                // Both tools exhausted
-                state->lastNoiseAssessment = FF_NOISE_ACCEPTABLE;
-            }
-        }
-    } else {
-        // Improvement below threshold — converged
-        state->lastNoiseAssessment = (noiseScore < state->noiseBaseline / 2) ?
-            FF_NOISE_MINIMAL : FF_NOISE_ACCEPTABLE;
+        // Noise improving — update baseline and apply another step
+        state->noiseBaseline = noiseScore;
+        applyNoiseReduction(state, axis, src);
     }
+    // else: improvement below threshold — converged, no action
 }
 
 // ============================================================================
@@ -1065,27 +1327,49 @@ static ffAutotunePhase_e priorityDecision(ffAxisState_t *state)
         return state->phase;
     }
 
+    const uint16_t noiseFloor = ffAutotuneConfig()->noise_floor;
     const int16_t deadband = ffAutotuneConfig()->error_deadband * 10;
     const uint8_t ringThreshold = ffAutotuneConfig()->ring_threshold;
 
-    // Severity: metric / threshold (0 = perfect, >1 = needs work)
-    // Using integer arithmetic: severity_x2 = metric * 2 / threshold
+    // Priority 0: Catastrophic noise — PID loop unstable, tracking error is unreliable.
+    if (m->noiseScore > noiseFloor * 2) {
+        // Exponential gain scale reduction
+        state->gainScalePercent = state->gainScalePercent / 2;
+        if (state->gainScalePercent < ffAutotuneConfig()->gain_scale_min) {
+            state->gainScalePercent = ffAutotuneConfig()->gain_scale_min;
+        }
+        runtime.gainsModified = true;
+        return FF_AUTOTUNE_PHASE2B_GAIN_NOISE;
+    }
+
     int16_t trackSeverity_x10 = (ABS(m->trackingError) * 10) / MAX(deadband, 1);
     int16_t ringSeverity_x10 = (m->ringingScore * 10) / MAX(ringThreshold, 1);
+
+    // Priority 0.5: Catastrophic ringing with gainScale < 100 — gains were over-reduced.
+    if (ringSeverity_x10 > 20 && state->gainScalePercent < 100) {
+        state->gainScalePercent = (100 + state->gainScalePercent) / 2;
+        runtime.gainsModified = true;
+        return FF_AUTOTUNE_PHASE2B_GAIN_NOISE;
+    }
 
     // Priority 1: Severe tracking error (>2x deadband) -> fix F first
     if (trackSeverity_x10 > 20) {
         return FF_AUTOTUNE_PHASE1_FF;
     }
 
-    // Priority 2: Ringing above threshold (and P/D not converged)
-    if (ringSeverity_x10 > 10 && state->ringBracketState != FF_BRACKET_CONVERGED) {
-        return FF_AUTOTUNE_PHASE2_PD;
+    // Priority 2: Underdamped (ringing > threshold)
+    if (m->dampingAssessment == FF_DAMPING_UNDERDAMPED) {
+        return FF_AUTOTUNE_PHASE2_UNDERDAMPED;
     }
 
-    // Priority 3: Noise above absolute floor — reduce LPF2 / scale down P+D
-    if (m->noiseScore > ffAutotuneConfig()->noise_floor) {
-        return FF_AUTOTUNE_PHASE2B_SCALE;
+    // Priority 2.5: Overdamped
+    if (m->dampingAssessment == FF_DAMPING_OVERDAMPED) {
+        return FF_AUTOTUNE_PHASE2_OVERDAMPED;
+    }
+
+    // Priority 3: Noise above absolute floor
+    if (m->noiseScore > noiseFloor) {
+        return FF_AUTOTUNE_PHASE2B_GAIN_NOISE;
     }
 
     // Priority 4: Mild tracking error (>1x deadband)
@@ -1093,16 +1377,11 @@ static ffAutotunePhase_e priorityDecision(ffAxisState_t *state)
         return FF_AUTOTUNE_PHASE1_FF;
     }
 
-    // Priority 5: Mild ringing (>0.5x threshold)
-    if (ringSeverity_x10 > 5) {
-        return FF_AUTOTUNE_PHASE2_PD;
-    }
-
     // All within deadbands
     return FF_AUTOTUNE_COMPLETE;
 }
 
-static void checkConvergence(ffAxisState_t *state)
+static void checkConvergence(ffAxisState_t *state, int axis)
 {
     const ffMetricSnapshot_t *m = &state->lastMetrics;
     if (!m->valid) {
@@ -1115,6 +1394,23 @@ static void checkConvergence(ffAxisState_t *state)
     bool trackingOk = ABS(m->trackingError) <= deadband;
     bool ringingOk = m->ringingScore <= ringThreshold;
     bool noiseOk = m->noiseScore <= ffAutotuneConfig()->noise_floor;
+
+    if (noiseOk) {
+        state->maneuversSinceNoise++;
+        // D ceiling reassessment: after 20 quiet maneuvers, bump ceiling up by d_step
+        int8_t ceiling = getDNoiseCeiling(axis);
+        if (ceiling > 0 && state->maneuversSinceNoise >= 20) {
+            ceiling += ffAutotuneConfig()->d_step;
+            if (axis == FD_ROLL) {
+                ffAutotuneConfigMutable()->d_noise_ceiling_roll = ceiling;
+            } else {
+                ffAutotuneConfigMutable()->d_noise_ceiling_pitch = ceiling;
+            }
+            state->dNoiseTriggerCount = 0;
+            state->maneuversSinceNoise = 0;
+            runtime.gainsModified = true;
+        }
+    }
 
     if (trackingOk && ringingOk && noiseOk) {
         state->convergenceCount++;
@@ -1159,9 +1455,16 @@ static void processManeuverEnd(ffAxisState_t *state, int axis)
     state->lastMetrics.trackingError = avgError;
     state->lastMetrics.trackingAssessment = state->lastAssessment;
     state->lastMetrics.ringingScore = state->lastRingingScore;
-    state->lastMetrics.ringAssessment = state->lastRingAssessment;
+    state->lastMetrics.dampingAssessment = state->lastDampingAssessment;
     state->lastMetrics.noiseScore = state->lastNoiseScore;
     state->lastMetrics.valid = true;
+
+    // Priority 0: Catastrophic noise overrides bootstrap — PID loop unstable,
+    // tuning F is pointless when gains are this far off
+    if (!state->bootstrapComplete && state->lastNoiseScore > ffAutotuneConfig()->noise_floor * 2) {
+        state->bootstrapComplete = true;
+        state->noiseBaseline = state->lastNoiseScore;
+    }
 
     // ── Step 3: Bootstrap check ──
     if (!state->bootstrapComplete) {
@@ -1207,14 +1510,16 @@ static void processManeuverEnd(ffAxisState_t *state, int axis)
                 }
                 break;
 
-            case FF_AUTOTUNE_PHASE2_PD:
-                // Ringing needs attention — already processed in processPhase2Ringing()
-                state->phase = FF_AUTOTUNE_PHASE2_PD;
+            case FF_AUTOTUNE_PHASE2_UNDERDAMPED:
+                state->phase = FF_AUTOTUNE_PHASE2_UNDERDAMPED;
                 break;
 
-            case FF_AUTOTUNE_PHASE2B_SCALE:
-                // Noise needs attention — already processed in processPhase2bNoise()
-                state->phase = FF_AUTOTUNE_PHASE2B_SCALE;
+            case FF_AUTOTUNE_PHASE2_OVERDAMPED:
+                state->phase = FF_AUTOTUNE_PHASE2_OVERDAMPED;
+                break;
+
+            case FF_AUTOTUNE_PHASE2B_GAIN_NOISE:
+                state->phase = FF_AUTOTUNE_PHASE2B_GAIN_NOISE;
                 break;
 
             case FF_AUTOTUNE_COMPLETE:
@@ -1223,7 +1528,7 @@ static void processManeuverEnd(ffAxisState_t *state, int axis)
         }
 
         // ── Step 5: Check convergence ──
-        checkConvergence(state);
+        checkConvergence(state, axis);
     }
 
     state->maneuverCount++;
@@ -1231,8 +1536,6 @@ static void processManeuverEnd(ffAxisState_t *state, int axis)
     // Reset accumulators for next maneuver (state transition handled by caller)
     state->errorAccumulator = 0.0f;
     state->sampleCount = 0;
-
-    UNUSED(axis);
 }
 
 // ============================================================================
@@ -1287,7 +1590,7 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
         const uint32_t ringWindowUs = (uint32_t)ffAutotuneConfig()->ring_window_ms * 1000;
         if (cmpTimeUs(currentTimeUs, state->ringWindowStartTime) >= (timeDelta_t)ringWindowUs) {
             // Window duration expired — always process ringing
-            processPhase2Ringing(state);
+            processDamping(state, axis);
         } else {
             ringWindowAccumulate(state, signedError);
         }
@@ -1319,10 +1622,12 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
                 // Expected lag in deg/s = |angular_accel| × filter_delay_seconds
                 state->expectedLagAccumulator = fabsf(setpointDelta) * runtime.filterGroupDelay;
                 state->sampleCount = 1;
-                // Always reset noise accumulator at start of rise (concurrent measurement)
+                // Always reset noise accumulators at start of rise (concurrent measurement)
                 noiseReset(state);
                 state->noiseAccumulator = fabsf(pidData[axis].D);
                 state->noiseSampleCount = 1;
+                state->gyroNoiseAccumulator = fabsf(gyro.gyroADC[axis] - gyro.gyroADCf[axis]);
+                state->gyroNoiseSampleCount = 1;
             }
             break;
 
@@ -1334,9 +1639,11 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
                 state->errorAccumulator += trackingError;
                 state->expectedLagAccumulator += fabsf(setpointDelta) * runtime.filterGroupDelay;
                 state->sampleCount++;
-                // Always accumulate |D-term| noise during the rise (concurrent)
+                // Always accumulate |D-term| noise and gyro noise during the rise (concurrent)
                 state->noiseAccumulator += fabsf(pidData[axis].D);
                 state->noiseSampleCount++;
+                state->gyroNoiseAccumulator += fabsf(gyro.gyroADC[axis] - gyro.gyroADCf[axis]);
+                state->gyroNoiseSampleCount++;
             } else {
                 // No longer rising (accel dropped or direction changed) -> ADJUSTING
                 state->windowState = FF_WINDOW_ADJUSTING;
@@ -1348,7 +1655,7 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
                 }
                 // Always finalize noise measured during the rise (concurrent)
                 if (state->noiseSampleCount >= 3) {
-                    processPhase2bNoise(state);
+                    processPhase2bNoise(state, axis);
                 }
             }
             break;
@@ -1370,7 +1677,7 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
                 state->idleEntryTime = currentTimeUs;
                 // Close ringing window if still open (always process — concurrent)
                 if (state->ringWindowActive) {
-                    processPhase2Ringing(state);
+                    processDamping(state, axis);
                 }
             }
             break;
@@ -1379,42 +1686,33 @@ static void updateAxisTracking(int axis, float setpoint, float gyroRate,
     state->prevAccel = absAccel;
     state->prevSetpoint = setpoint;
 
-    // Consolidated debug output (8 channels, phase-multiplexed)
-    // ch0: gain, ch1: trackingError, ch2: windowState, ch3: phase
-    // ch4-7: phase-specific (see switch below)
+    // Debug output: always-visible, not phase-multiplexed
+    // ch0: Roll P+D+F adj packed | ch1: Pitch P+D+F adj packed
+    // ch2: gainScale*100 + dtermLpf2Adj+50 | ch3: phase*10 + windowState
+    // ch4: tracking error (x10) | ch5: damping*10000 + ringing/overdamped score
+    // ch6: noise score (D-term) | ch7: dCeiling*100 + convergenceCount
     if (axis == gyro.gyroDebugAxis) {
-        DEBUG_SET(DEBUG_FF_AUTOTUNE, 0, state->gain);
-        DEBUG_SET(DEBUG_FF_AUTOTUNE, 1, lrintf(trackingError));
-        DEBUG_SET(DEBUG_FF_AUTOTUNE, 2, state->windowState);
-        DEBUG_SET(DEBUG_FF_AUTOTUNE, 3, state->phase);
-
-        switch (state->phase) {
-            case FF_AUTOTUNE_PHASE1_FF:
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, state->lastAvgError);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 5, state->bracketState);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, state->lastAssessment);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 7, state->historyCount);
-                break;
-            case FF_AUTOTUNE_PHASE2_PD:
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, state->lastRingingScore);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 5, state->pAdjustment);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, state->dAdjustment);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 7, state->lastRingAssessment);
-                break;
-            case FF_AUTOTUNE_PHASE2B_SCALE:
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, state->lastNoiseScore);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 5, state->scaleAdjustment);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, getEffectiveLpf2Hz());
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 7, state->lastNoiseAssessment);
-                break;
-            case FF_AUTOTUNE_COMPLETE:
-                // Show lastMetrics snapshot for post-convergence monitoring
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, state->lastMetrics.trackingError);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 5, state->lastMetrics.ringingScore);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, state->lastMetrics.noiseScore);
-                DEBUG_SET(DEBUG_FF_AUTOTUNE, 7, state->convergenceCount);
-                break;
+        // Pack P+D+F adjustments per axis into single int16
+        // Encoding: (pAdj+20)*525 + (dAdj+10)*25 + (fAdj/8+12)
+        // Max: 40*525 + 20*25 + 24 = 21524, fits int16
+        for (int i = 0; i < 2; i++) {
+            ffAxisState_t *s = &runtime.axis[i];
+            int16_t pEnc = constrain(s->pAdjustment, -20, 20) + 20;
+            int16_t dEnc = constrain(s->dAdjustment, -10, 10) + 10;
+            int16_t fAdj = (int16_t)s->gain - (int16_t)currentPidProfile->pid[i].F;
+            int16_t fEnc = constrain(fAdj / 8, -12, 12) + 12;
+            DEBUG_SET(DEBUG_FF_AUTOTUNE, i, pEnc * 525 + dEnc * 25 + fEnc);
         }
+
+        DEBUG_SET(DEBUG_FF_AUTOTUNE, 2,
+            (int16_t)state->gainScalePercent * 100 + constrain(runtime.dtermLpf2Adjustment + 50, 0, 99));
+        DEBUG_SET(DEBUG_FF_AUTOTUNE, 3, state->phase * 10 + state->windowState);
+        DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, state->lastMetrics.valid ? state->lastMetrics.trackingError : lrintf(trackingError * 10.0f));
+        DEBUG_SET(DEBUG_FF_AUTOTUNE, 5,
+            (int16_t)state->lastDampingAssessment * 10000 + (int16_t)MIN(state->lastRingingScore, 9999));
+        DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, state->lastNoiseScore);
+        DEBUG_SET(DEBUG_FF_AUTOTUNE, 7,
+            getDNoiseCeiling(axis) * 100 + MIN(state->convergenceCount, 99));
     }
 }
 
@@ -1436,12 +1734,9 @@ void ffAutotuneUpdate(int axis, float setpoint, float gyroRate, float setpointDe
 
     // Mode transition handling
     if (modeActive && !runtime.wasActive) {
-        // Just activated
+        // Just activated — all overrides become active (additive, safe at 0)
         runtime.active = true;
-        // Mark gains as learned if we have non-zero gains
-        if (runtime.axis[FD_ROLL].gain > 0 || runtime.axis[FD_PITCH].gain > 0) {
-            runtime.gainsLearned = true;
-        }
+        runtime.gainsLearned = true;
         beeper(BEEPER_RX_SET);
 
     } else if (!modeActive && runtime.wasActive) {

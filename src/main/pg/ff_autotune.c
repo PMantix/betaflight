@@ -22,7 +22,7 @@
 #include "pg/pg_ids.h"
 #include "pg/ff_autotune.h"
 
-PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 5);
+PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 8);
 
 PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     // Phase 1: F-term tuning
@@ -35,8 +35,8 @@ PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     .gain_min = 0,              // Min gain limit
     .error_deadband = 10,       // 10 deg/s deadband
     .converge_threshold = 3,    // Converge when bracket <= 3
-    .gain_roll = 0,             // Start with no FF
-    .gain_pitch = 0,            // Start with no FF
+    .f_adj_roll = 0,            // No initial F adjustment (use configured F)
+    .f_adj_pitch = 0,           // No initial F adjustment (use configured F)
     // Phase 2: P/D ratio tuning
     .pd_enabled = 1,            // Enabled by default (requires Phase 1 convergence)
     .ring_window_ms = 150,      // 150ms analysis window
@@ -53,13 +53,20 @@ PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     // Phase 2b: Noise reduction (filter adjustment + P/D scale-down)
     .noise_floor = 600,         // Absolute noise score (avg|D|×10) below which noise is acceptable
     .noise_threshold = 10,      // 10% noise improvement threshold to continue
-    .lpf2_step = 25,            // 25 Hz LPF2 cutoff reduction per iteration
-    .lpf2_min = 150,            // Minimum 150 Hz LPF2 cutoff
-    .scale_step = 1,            // 1 unit step per iteration
-    .scale_max = 15,            // Max 15 units cumulative scale-down
-    .lpf2_adj = 0,              // No initial LPF2 adjustment
-    .scale_adj_roll = 0,        // No initial scale adjustment
-    .scale_adj_pitch = 0,       // No initial scale adjustment
+    .gyro_noise_threshold = 400,// Gyro noise score above which noise is filter-related
+    .lpf2_step = 25,            // 25 Hz gyro LPF2 cutoff reduction per iteration
+    .lpf2_min = 150,            // Minimum 150 Hz gyro LPF2 cutoff
+    .dterm_lpf2_step = 10,      // 10 Hz D-term LPF2 cutoff reduction per iteration
+    .dterm_lpf2_min = 80,       // Minimum 80 Hz D-term LPF2 cutoff
+    .gain_scale_step = 5,       // 5% per noise trigger
+    .gain_scale_min = 50,       // Minimum 50% (gains can halve at most)
+    .lpf2_adj = 0,              // No initial gyro LPF2 adjustment
+    .dterm_lpf2_adj = 0,        // No initial D-term LPF2 adjustment
+    .gain_scale_roll = 100,     // 100% = no scaling
+    .gain_scale_pitch = 100,    // 100% = no scaling
+    // D noise ceiling learning
+    .d_noise_ceiling_roll = 0,  // Not learned
+    .d_noise_ceiling_pitch = 0, // Not learned
 );
 
 #endif // USE_FF_AUTOTUNE
