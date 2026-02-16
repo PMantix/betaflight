@@ -2106,6 +2106,10 @@ const clivalue_t valueTable[] = {
     { "ff_autotune_gain_scale_pitch",   VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 20, 100 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, gain_scale_pitch) },
     { "ff_autotune_d_noise_ceiling_roll",  VAR_INT8 | MASTER_VALUE, .config.minmax = { 0, 127 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_noise_ceiling_roll) },
     { "ff_autotune_d_noise_ceiling_pitch", VAR_INT8 | MASTER_VALUE, .config.minmax = { 0, 127 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, d_noise_ceiling_pitch) },
+    { "ff_autotune_motor_trim_1",          VAR_INT16 | MASTER_VALUE, .config.minmax = { -200, 200 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, motor_trim_1) },
+    { "ff_autotune_motor_trim_2",          VAR_INT16 | MASTER_VALUE, .config.minmax = { -200, 200 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, motor_trim_2) },
+    { "ff_autotune_motor_trim_3",          VAR_INT16 | MASTER_VALUE, .config.minmax = { -200, 200 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, motor_trim_3) },
+    { "ff_autotune_motor_trim_4",          VAR_INT16 | MASTER_VALUE, .config.minmax = { -200, 200 }, PG_FF_AUTOTUNE_CONFIG, offsetof(ffAutotuneConfig_t, motor_trim_4) },
 #endif
 };
 

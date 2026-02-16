@@ -46,10 +46,11 @@ typedef enum {
 
 // Autotune phase (per-axis)
 typedef enum {
-    FF_AUTOTUNE_PHASE1_FF = 0,        // Tuning feedforward gain
-    FF_AUTOTUNE_PHASE2_UNDERDAMPED,   // P/D ratio adjustment for ringing (decrease P, increase D)
-    FF_AUTOTUNE_PHASE2_OVERDAMPED,    // P/D ratio adjustment for sluggish response (increase P, decrease D)
-    FF_AUTOTUNE_PHASE2B_GAIN_NOISE,   // Ratio-preserving gain scale-down for noise reduction
+    FF_AUTOTUNE_PHASE0_MOTOR_TRIM = 0, // Learn per-motor thrust trim during hover
+    FF_AUTOTUNE_PHASE1_FF = 1,         // Tuning feedforward gain
+    FF_AUTOTUNE_PHASE2_UNDERDAMPED,    // P/D ratio adjustment for ringing (decrease P, increase D)
+    FF_AUTOTUNE_PHASE2_OVERDAMPED,     // P/D ratio adjustment for sluggish response (increase P, decrease D)
+    FF_AUTOTUNE_PHASE2B_GAIN_NOISE,    // Ratio-preserving gain scale-down for noise reduction
     FF_AUTOTUNE_COMPLETE               // All metrics converged
 } ffAutotunePhase_e;
 
@@ -84,6 +85,9 @@ int16_t ffAutotuneGetPAdjustment(int axis);
 int16_t ffAutotuneGetDAdjustment(int axis);
 int16_t ffAutotuneGetLpf2Adjustment(void);
 int16_t ffAutotuneGetDtermLpf2Adjustment(void);
+
+// Phase 0: Per-motor gain normalization (always applied once learned)
+float ffAutotuneGetMotorGainCorrection(int motorIndex);
 
 // COMPLETE notification wiggle offset (added to setpoint in pid.c)
 float ffAutotuneGetWiggleOffset(int axis);

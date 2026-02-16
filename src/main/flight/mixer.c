@@ -65,6 +65,8 @@
 #include "sensors/gyro.h"
 #include "sensors/sensors.h"
 
+#include "flight/ff_autotune.h"
+
 #include "mixer.h"
 
 #define DYN_LPF_THROTTLE_STEPS             100
@@ -466,6 +468,15 @@ static void applyMixToMotors(const float motorMix[MAX_SUPPORTED_MOTORS], motorMi
 #ifdef USE_SERVOS
         if (mixerIsTricopter()) {
             motorOutput += mixerTricopterMotorCorrection(i);
+        }
+#endif
+#ifdef USE_FF_AUTOTUNE
+        {
+            const float gainCorr = ffAutotuneGetMotorGainCorrection(i);
+            if (gainCorr != 1.0f) {
+                const float delta = motorOutput - motorOutputMin;
+                motorOutput = motorOutputMin + delta * gainCorr;
+            }
         }
 #endif
         if (failsafeIsActive()) {

@@ -247,6 +247,11 @@ static struct {
     int16_t dtermLpf2Adjustment;    // Current D-term LPF2 cutoff adjustment (Hz, negative = reduced)
     uint8_t dtermLpf2Type;          // Cached D-term LPF2 filter type
     ffAxisState_t axis[2];          // Roll and Pitch only
+
+    // Phase 0: Motor trim learning
+    bool motorTrimLearning;                         // Currently in Phase 0
+    float motorTrimAccum[MAX_SUPPORTED_MOTORS];     // Accumulated motor output per motor
+    uint32_t motorTrimSampleCount;                  // Number of samples accumulated
 } runtime;
 
 // ============================================================================
@@ -541,6 +546,19 @@ float ffAutotuneGetWiggleOffset(int axis)
         return 0.0f;
     }
     return runtime.axis[axis].wiggleOffset;
+}
+
+float ffAutotuneGetMotorGainCorrection(int motorIndex)
+{
+    int16_t permil;
+    switch (motorIndex) {
+        case 0: permil = ffAutotuneConfig()->motor_trim_1; break;
+        case 1: permil = ffAutotuneConfig()->motor_trim_2; break;
+        case 2: permil = ffAutotuneConfig()->motor_trim_3; break;
+        case 3: permil = ffAutotuneConfig()->motor_trim_4; break;
+        default: return 1.0f;
+    }
+    return 1.0f + permil / 1000.0f;
 }
 
 bool ffAutotuneNeedsSave(void)
@@ -1525,6 +1543,10 @@ static void processManeuverEnd(ffAxisState_t *state, int axis)
             case FF_AUTOTUNE_COMPLETE:
                 state->phase = FF_AUTOTUNE_COMPLETE;
                 break;
+
+            case FF_AUTOTUNE_PHASE0_MOTOR_TRIM:
+                // Not reachable from priorityDecision()
+                break;
         }
 
         // ── Step 5: Check convergence ──
@@ -1739,6 +1761,21 @@ void ffAutotuneUpdate(int axis, float setpoint, float gyroRate, float setpointDe
         runtime.gainsLearned = true;
         beeper(BEEPER_RX_SET);
 
+        // Check if motor trims have been learned
+        const bool trimsLearned = (ffAutotuneConfig()->motor_trim_1 != 0 ||
+                                   ffAutotuneConfig()->motor_trim_2 != 0 ||
+                                   ffAutotuneConfig()->motor_trim_3 != 0 ||
+                                   ffAutotuneConfig()->motor_trim_4 != 0);
+        if (!trimsLearned) {
+            // Enter Phase 0: motor trim learning
+            runtime.motorTrimLearning = true;
+            runtime.motorTrimSampleCount = 0;
+            memset(runtime.motorTrimAccum, 0, sizeof(runtime.motorTrimAccum));
+            for (int a = 0; a < 2; a++) {
+                runtime.axis[a].phase = FF_AUTOTUNE_PHASE0_MOTOR_TRIM;
+            }
+        }
+
     } else if (!modeActive && runtime.wasActive) {
         // Just deactivated - stop learning but keep gains applied
         runtime.active = false;
@@ -1753,6 +1790,81 @@ void ffAutotuneUpdate(int axis, float setpoint, float gyroRate, float setpointDe
 
     // Update tracking if active
     if (runtime.active) {
+        // Phase 0: Motor gain learning (run once per PID loop on roll axis only)
+        if (runtime.motorTrimLearning && axis == FD_ROLL) {
+            #define MOTOR_GAIN_SAMPLES 8000  // ~2s at 4kHz during hover
+
+            // Accumulate during low-stick hover
+            const float absSetpoint = fabsf(setpoint);
+            if (absSetpoint < 30.0f) {
+                const int motorCount = getMotorCount();
+                for (int i = 0; i < motorCount; i++) {
+                    runtime.motorTrimAccum[i] += motor[i];
+                }
+                runtime.motorTrimSampleCount++;
+            }
+
+            // Compute running gain corrections for debug display (permil deviation from 1.0×)
+            const int motorCount = getMotorCount();
+            int16_t corrections[4] = {0, 0, 0, 0};
+            if (runtime.motorTrimSampleCount > 0) {
+                float grandMean = 0;
+                for (int i = 0; i < motorCount; i++) {
+                    grandMean += runtime.motorTrimAccum[i];
+                }
+                grandMean /= (motorCount * (float)runtime.motorTrimSampleCount);
+
+                if (grandMean > 0) {
+                    for (int i = 0; i < motorCount && i < 4; i++) {
+                        float motorMean = runtime.motorTrimAccum[i] / (float)runtime.motorTrimSampleCount;
+                        corrections[i] = lrintf((motorMean / grandMean - 1.0f) * 1000.0f);
+                    }
+                }
+            }
+
+            // Save and transition when enough samples collected
+            if (runtime.motorTrimSampleCount >= MOTOR_GAIN_SAMPLES) {
+                ffAutotuneConfigMutable()->motor_trim_1 = corrections[0];
+                ffAutotuneConfigMutable()->motor_trim_2 = corrections[1];
+                ffAutotuneConfigMutable()->motor_trim_3 = corrections[2];
+                ffAutotuneConfigMutable()->motor_trim_4 = corrections[3];
+
+                runtime.motorTrimLearning = false;
+                runtime.gainsModified = true;
+
+                // Transition both axes to Phase 1
+                for (int a = 0; a < 2; a++) {
+                    runtime.axis[a].phase = FF_AUTOTUNE_PHASE1_FF;
+                    runtime.axis[a].idleEntryTime = currentTimeUs;
+                }
+            }
+
+            // Debug output during Phase 0
+            if (axis == gyro.gyroDebugAxis) {
+                ffAxisState_t *state = &runtime.axis[FD_ROLL];
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 0, 0);
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 1, 0);
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 2, 0);
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 3, state->phase * 10 + state->windowState);
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 4, runtime.motorTrimSampleCount / 100);
+                // Running gain corrections (permil deviation from 1.0×)
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 5, corrections[0]);
+                DEBUG_SET(DEBUG_FF_AUTOTUNE, 6, corrections[1]);
+                // Motor spread: max - min of current motor[] values
+                if (motorCount > 0) {
+                    float motorMax = motor[0], motorMin = motor[0];
+                    for (int i = 1; i < motorCount; i++) {
+                        if (motor[i] > motorMax) motorMax = motor[i];
+                        if (motor[i] < motorMin) motorMin = motor[i];
+                    }
+                    DEBUG_SET(DEBUG_FF_AUTOTUNE, 7, lrintf(motorMax - motorMin));
+                }
+            }
+
+            // Skip per-axis state machine during Phase 0
+            return;
+        }
+
         const float pidFrequency = gyro.targetLooptime > 0 ?
                                    1000000.0f / gyro.targetLooptime : 8000.0f;
 

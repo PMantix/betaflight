@@ -65,6 +65,12 @@ typedef struct ffAutotuneConfig_s {
     // D noise ceiling learning
     int8_t   d_noise_ceiling_roll;  // Learned D ceiling for roll (0 = not learned)
     int8_t   d_noise_ceiling_pitch; // Learned D ceiling for pitch (0 = not learned)
+
+    // Phase 0: Per-motor gain correction (permil deviation from 1.0×)
+    int16_t  motor_trim_1;          // Motor 0 gain correction (0 = 1.000×, 56 = 1.056×)
+    int16_t  motor_trim_2;          // Motor 1 gain correction
+    int16_t  motor_trim_3;          // Motor 2 gain correction
+    int16_t  motor_trim_4;          // Motor 3 gain correction
 } ffAutotuneConfig_t;
 
 PG_DECLARE(ffAutotuneConfig_t, ffAutotuneConfig);

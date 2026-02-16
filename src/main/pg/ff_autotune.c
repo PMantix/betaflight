@@ -22,7 +22,7 @@
 #include "pg/pg_ids.h"
 #include "pg/ff_autotune.h"
 
-PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 8);
+PG_REGISTER_WITH_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig, PG_FF_AUTOTUNE_CONFIG, 10);
 
 PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     // Phase 1: F-term tuning
@@ -67,6 +67,11 @@ PG_RESET_TEMPLATE(ffAutotuneConfig_t, ffAutotuneConfig,
     // D noise ceiling learning
     .d_noise_ceiling_roll = 0,  // Not learned
     .d_noise_ceiling_pitch = 0, // Not learned
+    // Phase 0: Per-motor gain correction (permil deviation from 1.0×)
+    .motor_trim_1 = 0,
+    .motor_trim_2 = 0,
+    .motor_trim_3 = 0,
+    .motor_trim_4 = 0,
 );
 
 #endif // USE_FF_AUTOTUNE
